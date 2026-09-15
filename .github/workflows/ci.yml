@@ -10,7 +10,7 @@ jobs:
     name: build + test
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@v7.0.1
       - uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
@@ -50,7 +50,7 @@ jobs:
           --health-timeout 5s
           --health-retries 10
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@v7.0.1
       - uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
@@ -64,12 +64,12 @@ jobs:
     name: CLI end-to-end (real nix + containerized server)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@v7.0.1
       - uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
           cache: true
-      - uses: DeterminateSystems/nix-installer-action@v22
+      - uses: DeterminateSystems/nix-installer-action@v23
       - name: build admin CSS
         run: |
           curl -sSL https://github.com/tailwindlabs/tailwindcss/releases/download/v4.3.2/tailwindcss-linux-x64 -o /usr/local/bin/tailwindcss
@@ -84,8 +84,8 @@ jobs:
     name: nix flake builds (vendorHash in sync)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
-      - uses: DeterminateSystems/nix-installer-action@v22
+      - uses: actions/checkout@v7.0.1
+      - uses: DeterminateSystems/nix-installer-action@v23
       # Fails if flake.nix vendorHash is stale after a go.mod/go.sum bump.
       - run: nix build .#default -L
 
@@ -93,7 +93,7 @@ jobs:
     name: k6 operations conformance
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@v7.0.1
       - name: run ops suite (single-tenant)
         run: docker compose -f tests/k6/compose.yaml run --rm k6 run /scripts/ops.js
       # Fresh server per suite: ops ends with tokens in the DB (bootstrap
@@ -117,7 +117,7 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@v7.0.1
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
           fetch-depth: 0
