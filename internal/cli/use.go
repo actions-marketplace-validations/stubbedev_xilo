@@ -24,7 +24,7 @@ func useCmd() *cobra.Command {
 	var url, token string
 	var remove, makeDefault bool
 	c := &cobra.Command{
-		Use:   "use <ns/cache>",
+		Use:   "use <account>/<cache>",
 		Short: "Configure local Nix to use a cache (nix.conf + netrc)",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -32,7 +32,10 @@ func useCmd() *cobra.Command {
 			if url == "" {
 				return errNoServer
 			}
-			cache := normRef(args[0])
+			cache, err := resolveRef(url, token, args[0])
+			if err != nil {
+				return err
+			}
 
 			if remove {
 				sub := strings.TrimRight(url, "/") + "/c/" + cache
@@ -160,7 +163,7 @@ func updateNixConf(sub, pubkey string) error {
 
 func parseManagedBlock(content string) (subs, keys []string) {
 	inBlock := false
-	for _, line := range strings.Split(content, "\n") {
+	for line := range strings.SplitSeq(content, "\n") {
 		switch {
 		case strings.HasPrefix(line, blockStart):
 			inBlock = true

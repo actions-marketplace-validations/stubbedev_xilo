@@ -19,7 +19,7 @@ import (
 // mtServer is newTestServerCfg with multi-tenant mode on.
 func mtServer(t *testing.T) (*Server, *store.DB, *httptest.Server) {
 	t.Helper()
-	return newTestServerCfg(t, func(c *config.Config) { c.MultiTenant = true })
+	return newTestServerCfg(t, func(c *config.Config) { c.SelfService = true })
 }
 
 // postFlash POSTs a form and returns the landing path + body after the PRG
@@ -59,7 +59,7 @@ func TestAdminUserLifecycle(t *testing.T) {
 	}
 	// duplicate name
 	_, b = postFlash(t, c, ts.URL+"/admin/users", url.Values{"username": {"walter"}, "password": {"walterpass1"}})
-	if !contains(b, "Could not create user") {
+	if !contains(b, "That name is taken") {
 		t.Errorf("duplicate user: %.120q", b)
 	}
 
@@ -75,7 +75,7 @@ func TestAdminUserLifecycle(t *testing.T) {
 	loginAs(t, ts, "walter", "resetpass99") // fails the test if the login bounces
 	// unknown id → 404
 	resp, _ := c.PostForm(ts.URL+"/admin/users/99999/reset", url.Values{"password": {"resetpass99"}})
-	if resp.StatusCode != 404 {
+	if resp.StatusCode != http.StatusNotFound {
 		t.Errorf("reset missing user → %d want 404", resp.StatusCode)
 	}
 	resp.Body.Close()
@@ -85,10 +85,10 @@ func TestAdminUserLifecycle(t *testing.T) {
 	if !contains(b, "cannot delete your own account") {
 		t.Errorf("self delete: %.120q", b)
 	}
-	boss2, _ := db.CreateUser("boss2", "", passHash(t, "bosspass123"), "owner")
+	boss2, _ := db.CreateUser("boss2", "", passHash(t, "bosspass123"), store.RoleSuperadmin)
 	_, b = postFlash(t, c, ts.URL+"/admin/users/"+itoa(boss2.ID)+"/delete", nil)
-	if !contains(b, "owner cannot be deleted") {
-		t.Errorf("owner delete: %.120q", b)
+	if !contains(b, "superadmin cannot be deleted") {
+		t.Errorf("superadmin delete: %.120q", b)
 	}
 	founder, _ := db.CreateUser("founder", "", passHash(t, "founderpass1"), "user")
 	forg, _ := db.EnsureAccount("f-org", "org")
@@ -106,7 +106,7 @@ func TestAdminUserLifecycle(t *testing.T) {
 		t.Error("walter still exists after delete")
 	}
 	resp, _ = c.PostForm(ts.URL+"/admin/users/99999/delete", nil)
-	if resp.StatusCode != 404 {
+	if resp.StatusCode != http.StatusNotFound {
 		t.Errorf("delete missing user → %d want 404", resp.StatusCode)
 	}
 	resp.Body.Close()
@@ -131,7 +131,7 @@ func TestAdminUserCreateRequiresEmailMT(t *testing.T) {
 	c := adminClient(t, ts)
 
 	_, b := postFlash(t, c, ts.URL+"/admin/users", url.Values{"username": {"noemail"}, "password": {"longenough1"}})
-	if !contains(b, "valid email address is required") {
+	if !contains(b, "requires a valid email address") {
 		t.Errorf("MT create without email: %.120q", b)
 	}
 	_, b = postFlash(t, c, ts.URL+"/admin/users", url.Values{
@@ -157,7 +157,7 @@ func TestAdminOrgAndMembers(t *testing.T) {
 	}
 	// create → creator becomes owner
 	path, b := postFlash(t, c, ts.URL+"/admin/orgs", url.Values{"name": {"acme"}})
-	if path != "/admin/settings" || !contains(b, "ready") {
+	if path != "/admin/orgs" || !contains(b, "ready") {
 		t.Errorf("create org → %s %.120q", path, b)
 	}
 	acme := mustAccount(t, db, "acme")
@@ -201,22 +201,22 @@ func TestAdminOrgAndMembers(t *testing.T) {
 	if path != "/admin/org/acme" || !contains(b, "Only the owner") {
 		t.Errorf("admin delete org → %s %.120q", path, b)
 	}
-	// instance admin deletes → settings flash, org gone
+	// instance admin deletes → organizations flash, org gone
 	path, b = postFlash(t, c, ts.URL+"/admin/org/acme/delete", nil)
-	if path != "/admin/settings" || !contains(b, "deleted") {
+	if path != "/admin/orgs" || !contains(b, "deleted") {
 		t.Errorf("owner delete org → %s %.120q", path, b)
 	}
 	if _, err := db.GetAccount("acme"); err == nil {
 		t.Error("acme survived delete")
 	}
 
-	// a non-instance org owner deletes their own org and lands on the dashboard
+	// a non-instance org owner deletes their own org and lands on the list
 	zed, _ := db.CreateUser("zed", "", passHash(t, "zedpass1234"), "user")
 	zorg, _ := db.EnsureAccount("zorg", "org")
 	db.MakeOwner(zorg.ID, zed.ID)
 	ze := loginAs(t, ts, "zed", "zedpass1234")
 	path, b = postFlash(t, ze.Client, ts.URL+"/admin/org/zorg/delete", nil)
-	if path != "/admin" || !contains(b, "deleted") {
+	if path != "/admin/orgs" || !contains(b, "deleted") {
 		t.Errorf("org owner delete → %s %.120q", path, b)
 	}
 	if _, err := db.GetAccount("zorg"); err == nil {
@@ -233,7 +233,7 @@ func TestRefererPath(t *testing.T) {
 		{"http://example/admin/org/acme", "/admin/org/acme"},
 	}
 	for _, tc := range cases {
-		r := httptest.NewRequest("POST", "http://example/admin/context", nil)
+		r := httptest.NewRequest(http.MethodPost, "http://example/admin/context", nil)
 		if tc.ref != "" {
 			r.Header.Set("Referer", tc.ref)
 		}
@@ -267,7 +267,7 @@ func TestContextSwitcher(t *testing.T) {
 	}
 	post := func(c *http.Client, val, referer string) *http.Response {
 		t.Helper()
-		req, _ := http.NewRequest("POST", ts.URL+"/admin/context", strings.NewReader(url.Values{"ctx": {val}}.Encode()))
+		req, _ := http.NewRequest(http.MethodPost, ts.URL+"/admin/context", strings.NewReader(url.Values{"ctx": {val}}.Encode()))
 		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 		if referer != "" {
 			req.Header.Set("Referer", referer)
@@ -281,18 +281,25 @@ func TestContextSwitcher(t *testing.T) {
 		return resp
 	}
 
-	// instance admin can pick any account; redirect returns to the referring page
+	// Administering the instance is not the same as being in an account: an
+	// instance admin who is not a member cannot take one as their context.
 	ac := adminClient(t, ts)
+	resp = post(ac, "acme", ts.URL+"/admin/settings")
+	if v, ok := ctxCookieOf(resp); !ok || v != "" {
+		t.Errorf("non-member admin ctx cookie = %q ok=%v (want cleared)", v, ok)
+	}
+	// As a member they can; the redirect returns to the referring page.
+	db.SetMember(acme.ID, adminID(t, db), "admin")
 	resp = post(ac, "acme", ts.URL+"/admin/settings")
 	if v, ok := ctxCookieOf(resp); !ok || v != "acme" {
 		t.Errorf("admin ctx cookie = %q ok=%v", v, ok)
 	}
-	if loc := resp.Header.Get("Location"); resp.StatusCode != 303 || loc != "/admin/settings" {
+	if loc := resp.Header.Get("Location"); resp.StatusCode != http.StatusSeeOther || loc != "/admin/settings" {
 		t.Errorf("context redirect → %d %q", resp.StatusCode, loc)
 	}
 	// dashboard renders with the active context (activeContext resolves it)
 	resp2, _ := ac.Get(ts.URL + "/admin")
-	if resp2.StatusCode != 200 {
+	if resp2.StatusCode != http.StatusOK {
 		t.Errorf("dashboard with context → %d", resp2.StatusCode)
 	}
 	resp2.Body.Close()
@@ -333,10 +340,20 @@ func TestAccountEmail(t *testing.T) {
 	}
 	// duplicate email (unique index) surfaces as a flash, not a 500
 	_, b = postFlash(t, c, ts.URL+"/admin/account/email", url.Values{"email": {"eve@example.com"}})
-	if !contains(b, "Could not save email") {
+	if !contains(b, "Could not save your email address") {
 		t.Errorf("dup email: %.120q", b)
 	}
 	// clearing is allowed in single-tenant mode
+	// Palette: a known id sticks and reaches the <html> tag; junk falls back
+	// to the default instead of erroring.
+	_, b = postFlash(t, c, ts.URL+"/admin/account/appearance", url.Values{"theme": {"catppuccin"}})
+	if !contains(b, "Appearance saved") || !contains(b, `data-palette="catppuccin"`) {
+		t.Errorf("theme not applied:\n%s", b[:min(len(b), 400)])
+	}
+	_, b = postFlash(t, c, ts.URL+"/admin/account/appearance", url.Values{"theme": {"hotdog-stand"}})
+	if contains(b, "data-palette=") {
+		t.Error("unknown palette was stored")
+	}
 	_, b = postFlash(t, c, ts.URL+"/admin/account/email", url.Values{"email": {""}})
 	if !contains(b, "Email cleared") {
 		t.Errorf("clear email: %.120q", b)
@@ -352,7 +369,7 @@ func TestAccountEmailRequiredMT(t *testing.T) {
 	c := adminClient(t, ts)
 	for _, bad := range []string{"", "not-an-email"} {
 		_, b := postFlash(t, c, ts.URL+"/admin/account/email", url.Values{"email": {bad}})
-		if !contains(b, "valid email address is required") {
+		if !contains(b, "requires a valid email address") {
 			t.Errorf("MT email %q: %.120q", bad, b)
 		}
 	}
@@ -402,7 +419,7 @@ func TestTenancyRoutesAbsentSingleTenant(t *testing.T) {
 		resp.Body.Close()
 	}
 	resp, _ := http.Get(ts.URL + "/register")
-	if resp.StatusCode != 404 {
+	if resp.StatusCode != http.StatusNotFound {
 		t.Errorf("single-tenant /register → %d want 404", resp.StatusCode)
 	}
 	resp.Body.Close()
@@ -464,7 +481,7 @@ func TestPlanCRUD(t *testing.T) {
 		t.Fatalf("edited plan: %+v", got)
 	}
 	resp, _ = c.PostForm(ts.URL+"/admin/plans/99999/edit", url.Values{"name": {"x"}})
-	if resp.StatusCode != 404 {
+	if resp.StatusCode != http.StatusNotFound {
 		t.Errorf("edit missing plan → %d want 404", resp.StatusCode)
 	}
 	resp.Body.Close()
@@ -526,7 +543,7 @@ func TestUserCreateOrg(t *testing.T) {
 	}
 	// happy path: org inherits the plan, creator becomes owner
 	path, b := postFlash(t, quinn.Client, ts.URL+"/admin/neworg", url.Values{"name": {"qorg"}})
-	if path != "/admin/account" || !contains(b, "created") {
+	if path != "/admin/orgs" || !contains(b, "created") {
 		t.Fatalf("create org → %s %.120q", path, b)
 	}
 	qorg := mustAccount(t, db, "qorg")
@@ -561,6 +578,9 @@ func TestAPINamespaces(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if _, err := db.EnsureAccount("default", "org"); err != nil {
+		t.Fatal(err)
+	}
 	pushTok, _, _ := db.CreateToken(0, "pleb", []string{"default/c"}, []string{"push"}, 0)
 
 	// non-admin tokens are refused on every verb
@@ -575,11 +595,11 @@ func TestAPINamespaces(t *testing.T) {
 		}
 	}
 
-	// list includes the built-in default namespace
+	// list includes the account created above
 	resp, b := apiReq(t, ts, http.MethodGet, "/api/v1/namespaces", adminTok, nil)
 	var nss []api.AccountResp
 	jsonUnmarshal(t, b, &nss)
-	if resp.StatusCode != 200 || len(nss) == 0 || nss[0].Name != "default" {
+	if resp.StatusCode != http.StatusOK || len(nss) == 0 || nss[0].Name != "default" {
 		t.Fatalf("list namespaces: %d %s", resp.StatusCode, b)
 	}
 
@@ -678,7 +698,7 @@ func TestRunListenErrorAndGracefulShutdown(t *testing.T) {
 	deadline := time.Now().Add(5 * time.Second)
 	for {
 		resp, err := http.Get("http://" + addr + "/healthz")
-		if err == nil && resp.StatusCode == 200 {
+		if err == nil && resp.StatusCode == http.StatusOK {
 			resp.Body.Close()
 			break
 		}

@@ -60,28 +60,39 @@ func TestSmokeAllComponents(t *testing.T) {
 	}{
 		{"Layout", views.Layout("Overview", "caches", views.Nav{LoggedIn: true, UserName: "admin", IsAdmin: true}, views.Flash{}), "Overview"},
 		{"Layout-flash-code", views.Layout("t", "", views.Nav{}, views.Flash{Msg: "created", Code: "secret123"}), "secret123"},
+		{"Layout-palette", views.Layout("t", "caches", views.Nav{LoggedIn: true, Theme: "nord"}, views.Flash{}), `data-palette="nord"`},
+		{"RowAction", views.RowAction("trash-2", "Delete row", true), `type="submit"`},
+		{"TableCard", views.TableCard(), "overflow-x-auto"},
 		{"Login", views.Login(false, false, false, views.Flash{}), "assword"},
 		{"Login-nopw-passkeys", views.Login(true, true, true, views.Flash{Msg: "bad login"}), "passkey"},
 		{"LoginCode", views.LoginCode("pending-id", views.Flash{Msg: "wrong code"}), "code"},
-		{"Account", views.Account(views.AccountData{Nav: views.Nav{LoggedIn: true, UserName: "admin"}, User: &store.User{Name: "admin", Role: "owner"}, Passkeys: []store.Passkey{{ID: 1, Name: "yubikey", Created: 1}}}), "yubikey"},
-		{"Instance", views.Instance(views.InstanceData{Nav: views.Nav{LoggedIn: true, UserName: "admin", IsAdmin: true}, Users: []store.User{{ID: 1, Name: "admin", Role: "owner"}}, Orgs: []views.OrgInfo{{Account: store.Account{ID: 1, Slug: "acme", Kind: "org"}, Members: []store.AccountMember{{UserID: 1, UserName: "admin", Role: "admin"}}}}, MultiTenant: true, AllowRegs: true, Plans: []store.Plan{{ID: 1, Name: "free", MaxCaches: 3, Public: true}}, Flash: views.Flash{Msg: "saved"}}), "saved"},
+		{"Account", views.Account(views.AccountData{Nav: views.Nav{LoggedIn: true, UserName: "admin"}, User: &store.User{Name: "admin", Role: "owner", Theme: "catppuccin"}, Passkeys: []store.Passkey{{ID: 1, Name: "yubikey", Created: 1}}}), "Appearance"},
+		{"Instance", views.Instance(views.InstanceData{Nav: views.Nav{LoggedIn: true, UserName: "admin", IsAdmin: true}, Users: []store.User{{ID: 1, Name: "admin", Role: "owner"}}, SelfService: true, AllowRegs: true, Plans: []store.Plan{{ID: 1, Name: "free", MaxCaches: 3, Public: true}}, Flash: views.Flash{Msg: "saved"}}), "saved"},
+		{"Orgs", views.OrgsPage(views.OrgsData{Nav: views.Nav{LoggedIn: true, UserName: "admin", IsAdmin: true, Orgs: true}, IsAdmin: true, CanCreate: true, Orgs: []views.OrgInfo{{Account: store.Account{ID: 1, Slug: "acme", Kind: "org"}, Members: []store.AccountMember{{UserID: 1, UserName: "admin", Role: "owner"}}}}}), "Workspaces"},
+		{"Console", views.Console(views.ConsoleData{Nav: views.Nav{LoggedIn: true, UserName: "admin", IsAdmin: true}, Global: store.Global{Caches: 2, Paths: 31, StoredBytes: 4096, LogicalBytes: 8192}, Dedup: "2.00", Users: 3, Orgs: []views.OrgInfo{{Account: store.Account{ID: 1, Slug: "acme", Kind: "org"}}}, Caches: []views.CacheUsage{{Cache: store.Cache{Account: "acme", Name: "web"}}}, Bytes: bytesFn}), "Console"},
 		{"PwHint-empty", views.PwHint(""), ""},
-		{"PwHint-short", views.PwHint("short"), "short"},
+		{"PwHint-short", views.PwHint("short"), "At least 8"},
 		{"PwHint-weak", views.PwHint("weak"), "Weak"},
 		{"PwHint-strong", views.PwHint("strong"), "Strong"},
 		{"PwHint-mismatch", views.PwHint("mismatch"), "match"},
-		{"TOTPEnroll", views.TOTPEnroll(views.Nav{LoggedIn: true}, "data:image/png;base64,x", "SECRET"), "SECRET"},
-		{"TOTPEnrollErr", views.TOTPEnrollErr(views.Nav{LoggedIn: true}, "data:image/png;base64,x", "SECRET", "bad code"), "bad code"},
+		{"TOTPEnrollBody", views.TOTPEnrollBody("data:image/png;base64,x", "SECRET", "bad code"), "SECRET"},
 		{"SectionHeader", views.SectionHeader("Head"), "Head"},
 		{"SearchInput", views.SearchInput("/admin", "q", "val", "find...", "#t"), "find..."},
 		{"StatTile", views.StatTile("box", "42", "things", "kpi1", ""), "42"},
 		{"StatTile-tone", views.StatTile("box", "9", "over", "kpi2", "text-destructive"), "over"},
 		{"EmptyState", views.EmptyState("inbox", "nothing here"), "nothing here"},
-		{"StatusBadge", views.StatusBadge("active"), "active"},
+		{"StatusIcon", views.StatusIcon("active"), "active"},
+		{"StatusIcon-revoked", views.StatusIcon("revoked"), "text-destructive"},
 		{"VisBadge-public", views.VisBadge(true), "Public"},
 		{"VisBadge-private", views.VisBadge(false), "Private"},
 		{"PermBadges", views.PermBadges([]string{"push", "pull"}), "push"},
 		{"CopyField", views.CopyField("copy-me"), "copy-me"},
+		{"Crumbs", views.Crumbs(views.Crumb{Label: "Caches", Href: "/admin"}, views.Crumb{Label: "here"}), "aria-current"},
+		{"PlusButton", views.PlusButton("New thing"), "New thing"},
+		{"DialogFooter", views.DialogFooter("dlg", "plus", "Create"), "Cancel"},
+		{"CardHeaderRow", views.CardHeaderRow("Row title"), "Row title"},
+		{"ListBox", views.ListBox(), "rounded-lg"},
+		{"ExpiryField", views.ExpiryField("dlg", nil), "Never"},
 		{"ConfirmForm", views.ConfirmForm(views.Confirm{ID: "c1", Action: "/admin/gc", Title: "Sure?", Message: "Really?", ConfirmLabel: "Yes", ConfirmIcon: "check", TriggerLabel: "Delete", TriggerIcon: "trash-2"}), "Delete"},
 		{"NotFound-in", views.NotFound(views.Nav{LoggedIn: true}), "not found"},
 		{"NotFound-out", views.NotFound(views.Nav{}), "not found"},
@@ -97,6 +108,18 @@ func TestSmokeAllComponents(t *testing.T) {
 		if tc.marker != "" && !strings.Contains(strings.ToLower(out), strings.ToLower(tc.marker)) {
 			t.Errorf("%s: output missing %q:\n%s", tc.name, tc.marker, out)
 		}
+	}
+}
+
+func TestDevModeScript(t *testing.T) {
+	nav := views.Nav{LoggedIn: true}
+	if out := render(t, "Layout", views.Layout("t", "", nav, views.Flash{})); strings.Contains(out, "/dev/events") {
+		t.Fatal("dev reload script rendered outside dev mode")
+	}
+	views.DevMode = true
+	defer func() { views.DevMode = false }()
+	if out := render(t, "Layout-dev", views.Layout("t", "", nav, views.Flash{})); !strings.Contains(out, "/dev/events") || !strings.Contains(out, "idiomorph") {
+		t.Fatal("dev reload script missing in dev mode")
 	}
 }
 
@@ -164,7 +187,16 @@ func TestSmokeCacheView(t *testing.T) {
 			t.Errorf("CacheView missing %q", want)
 		}
 	}
-	// Private cache, no paths, no query → empty state + private note.
+	// The path link leaves #path-results behind, so it must undo the swap
+	// attributes that region hands down: with them inherited, htmx selects a
+	// region the path page does not have and swaps in nothing.
+	if i := strings.Index(out, "/path/"); i < 0 {
+		t.Error("CacheView has no path link")
+	} else if row := out[max(0, i-400) : i+200]; !strings.Contains(row, `hx-select="unset"`) {
+		t.Error("path link inherits the #path-results swap attributes")
+	}
+	// Private cache, no paths, no query → empty state + private note, and the
+	// netrc line nix needs for a private pull.
 	priv := d
 	priv.Cache.Public = false
 	priv.Cache.MaxBytes = 0
@@ -172,7 +204,25 @@ func TestSmokeCacheView(t *testing.T) {
 	priv.PathQuery = ""
 	priv.PathTotal = 0
 	priv.PathPager = views.Pager{Page: 1, Pages: 1}
-	render(t, "CacheView-private-empty", views.CacheView(priv))
+	out = render(t, "CacheView-private-empty", views.CacheView(priv))
+	if !strings.Contains(out, "machine localhost:8080 login xilo password") {
+		t.Error("private CacheView has no netrc line")
+	}
+
+	// With mint rights and a fresh secret: the token controls appear and the
+	// snippets carry the real secret instead of a <token> placeholder.
+	minted := priv
+	minted.CanManage = true
+	minted.Secret = "s3cr3t-token-value"
+	out = render(t, "CacheView-minted", views.CacheView(minted))
+	for _, want := range []string{"Push token", "Pull token", "s3cr3t-token-value"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("minted CacheView missing %q", want)
+		}
+	}
+	if strings.Contains(out, "&lt;token&gt;") {
+		t.Error("minted CacheView still shows a <token> placeholder")
+	}
 	// Query with no matches → nomatch branch.
 	nomatch := priv
 	nomatch.PathQuery = "zzz"
@@ -214,13 +264,20 @@ func TestSmokeAuditPage(t *testing.T) {
 			{ID: 2, TS: now, Actor: "alice", Method: "DELETE", Path: "/admin/cache/default/demo/delete", Status: 303, IP: "10.0.0.1", UserAgent: "Mozilla/5.0", DurationMs: 7},
 			{ID: 1, TS: now, Method: "POST", Path: "/api/v1/caches", Status: 201, IP: "10.0.0.2", DurationMs: 42},
 		},
-		Query: "demo",
-		Total: 2,
-		Pager: views.Pager{Page: 1, Pages: 2, Next: "/admin/audit?page=2"},
-		Sort:  sortCtx(),
+		Query:   "demo",
+		Method:  "DELETE",
+		Status:  "4xx",
+		Methods: []string{"GET", "POST", "DELETE"},
+		Classes: []string{"2xx", "4xx"},
+		Stats:   store.AuditStats{Total: 1234, Failed: 5, Actors: 3, AvgMs: 12},
+		Total:   2,
+		Pager:   views.Pager{Page: 1, Pages: 2, Next: "/admin/audit?page=2"},
+		Sort:    sortCtx(),
 	}
 	out := render(t, "AuditPage", views.AuditPage(d))
-	for _, want := range []string{"alice", "DELETE", "/admin/cache/default/demo/delete", "10.0.0.1", "system", "42"} {
+	for _, want := range []string{"alice", "DELETE", "/admin/cache/default/demo/delete", "10.0.0.1", "system", "42",
+		// summary tiles + filter chips carrying the active search
+		"1.2k", "Failed", "Actors", "method=POST", "status=2xx", "q=x"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("AuditPage missing %q", want)
 		}
@@ -228,6 +285,49 @@ func TestSmokeAuditPage(t *testing.T) {
 	// Empty and no-match branches.
 	render(t, "AuditPage-empty", views.AuditPage(views.AuditData{Nav: d.Nav, Pager: views.Pager{Page: 1, Pages: 1}}))
 	render(t, "AuditPage-nomatch", views.AuditPage(views.AuditData{Nav: d.Nav, Query: "zzz", Pager: views.Pager{Page: 1, Pages: 1}}))
+}
+
+func TestSmokePathDetail(t *testing.T) {
+	d := views.PathData{
+		Cache: demoCache(),
+		Path: store.Path{
+			StorePath: "/nix/store/8kvxvr3pmsypxiypq4g8zy13glnfr7nx-glibc-2.42",
+			NarHash:   "sha256:0000000000000000000000000000000000000000000000000000",
+			NarSize:   300, Deriver: "glibc-2.42.drv",
+			Refs:   []string{"/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-libgcc-14", "/nix/store/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb-linux-headers"},
+			Chunks: []string{"c1", "c2"},
+		},
+		CSize:      120,
+		Present:    map[string]bool{"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa": true},
+		Chunks:     []store.ChunkRef{{Hash: "c1", Size: 200, CSize: 80}, {Hash: "c2", Size: 100, CSize: 40}},
+		ChunkPager: views.Pager{Page: 1, Pages: 1},
+		BaseURL:    "http://localhost:8080",
+		Bytes:      bytesFn,
+	}
+	out := render(t, "PathDetail", views.PathDetail(d))
+	for _, want := range []string{"glibc-2.42", "sha256:0000", "glibc-2.42.drv",
+		// present ref is a link, absent one is plain text
+		`href="/admin/cache/default/demo/path/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"`, "linux-headers",
+		"8kvxvr3pmsypxiypq4g8zy13glnfr7nx.narinfo", "c1", "200 B", "80 B"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("PathDetail missing %q", want)
+		}
+	}
+	if strings.Contains(out, `path/bbbbbbbb`) {
+		t.Error("absent reference rendered as a link")
+	}
+	// Broken path: no sizes, warning badge, no refs, no deriver.
+	broken := d
+	broken.Broken = true
+	broken.Path.Refs = nil
+	broken.Path.Deriver = ""
+	broken.Chunks = []store.ChunkRef{{Hash: "c1"}, {Hash: "c2"}}
+	out = render(t, "PathDetail-broken", views.PathDetail(broken))
+	for _, want := range []string{"chunks missing", "Depends on nothing", "not recorded"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("broken PathDetail missing %q", want)
+		}
+	}
 }
 
 func TestAsset(t *testing.T) {
@@ -253,10 +353,10 @@ func TestTokenHelpers(t *testing.T) {
 	if !views.TokenActive(active) || views.TokenActive(revoked) || views.TokenActive(expired) {
 		t.Fatal("TokenActive misclassifies")
 	}
-	if views.TokenExpiry(active) != "never" {
-		t.Fatalf("TokenExpiry(never) = %q", views.TokenExpiry(active))
+	if views.TokenExpiry(context.Background(), active) != "never" {
+		t.Fatalf("TokenExpiry(never) = %q", views.TokenExpiry(context.Background(), active))
 	}
-	if got := views.TokenExpiry(store.Token{Expires: 86400}); got != time.Unix(86400, 0).Format("2006-01-02") {
+	if got := views.TokenExpiry(context.Background(), store.Token{Expires: 86400}); got != time.Unix(86400, 0).Format("2006-01-02") {
 		t.Fatalf("TokenExpiry(date) = %q", got)
 	}
 }
@@ -293,17 +393,17 @@ func TestAgo(t *testing.T) {
 		{now - 60*86400, time.Unix(now-60*86400, 0).Format("2006-01-02")},
 	}
 	for _, c := range cases {
-		if got := views.Ago(c.ts); got != c.want {
+		if got := views.Ago(context.Background(), c.ts); got != c.want {
 			t.Errorf("Ago(%d) = %q, want %q", c.ts, got, c.want)
 		}
 	}
 }
 
 func TestT(t *testing.T) {
-	if views.T("tok.never") != "never" {
-		t.Fatalf("T(tok.never) = %q", views.T("tok.never"))
+	if views.T(context.Background(), "tok.never") != "never" {
+		t.Fatalf("T(tok.never) = %q", views.T(context.Background(), "tok.never"))
 	}
-	if views.T("no.such.key") != "no.such.key" {
+	if views.T(context.Background(), "no.such.key") != "no.such.key" {
 		t.Fatal("unknown key must echo the id")
 	}
 }

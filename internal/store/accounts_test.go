@@ -36,10 +36,11 @@ func TestAccountLifecycle(t *testing.T) {
 	}
 
 	db.EnsureAccount("beta", "org")
-	// A "default" account exists from DB open; ListAccounts is slug-sorted.
+	// A fresh database has no accounts of its own — in particular no
+	// "default" — so this lists exactly what was created, slug-sorted.
 	list, err := db.ListAccounts()
-	if err != nil || len(list) != 3 ||
-		list[0].Slug != "acme" || list[1].Slug != "beta" || list[2].Slug != "default" {
+	if err != nil || len(list) != 2 ||
+		list[0].Slug != "acme" || list[1].Slug != "beta" {
 		t.Fatalf("ListAccounts: %v %v", list, err)
 	}
 }
@@ -93,7 +94,7 @@ func TestUserAccountsAndMembers(t *testing.T) {
 	}
 
 	accs, err := db.UserAccounts(u.ID)
-	if err != nil || len(accs) != 1 || accs[0].Slug != "alice" || accs[0].Kind != "user" {
+	if err != nil || len(accs) != 1 || accs[0].Slug != "alice" || accs[0].Kind != "org" {
 		t.Fatalf("UserAccounts personal: %v %v", accs, err)
 	}
 
@@ -160,5 +161,34 @@ func TestPresentSet(t *testing.T) {
 	// Bad table name surfaces the query error.
 	if _, err := db.presentSet("no_such_table", "hash", []string{"h1"}); err == nil {
 		t.Fatal("presentSet on missing table should error")
+	}
+}
+
+// A superadmin administers organizations rather than being in one, so it gets
+// no account of its own — the check that keeps "runs the service" and "buys
+// the service" from being the same row.
+func TestSuperadminHasNoAccount(t *testing.T) {
+	db := openTest(t)
+	root, err := db.CreateUser("root", "", "hash", RoleSuperadmin)
+	if err != nil {
+		t.Fatalf("CreateUser: %v", err)
+	}
+	if !root.Superadmin() {
+		t.Fatal("role did not stick")
+	}
+	accs, err := db.UserAccounts(root.ID)
+	if err != nil || len(accs) != 0 {
+		t.Fatalf("superadmin accounts: %v %v", accs, err)
+	}
+	if _, err := db.GetAccount("root"); err == nil {
+		t.Fatal("superadmin got a personal account")
+	}
+	// An ordinary user still does.
+	u, err := db.CreateUser("nora", "", "hash", RoleUser)
+	if err != nil {
+		t.Fatalf("CreateUser: %v", err)
+	}
+	if accs, err := db.UserAccounts(u.ID); err != nil || len(accs) != 1 {
+		t.Fatalf("user accounts: %v %v", accs, err)
 	}
 }

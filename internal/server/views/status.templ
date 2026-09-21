@@ -3,7 +3,6 @@ package views
 import (
 	"fmt"
 	"strconv"
-	"strings"
 
 	"github.com/stubbedev/xilo/internal/store"
 
@@ -36,8 +35,8 @@ type StatusData struct {
 	PathsAdopted int64 // registered by copying an identical path (no upload)
 	ChunksRecv   int64
 	ChunksDedup  int64 // uploads that were already present
-	Bytes     func(int64) string
-	Charts    []ChartData
+	Bytes        func(int64) string
+	Charts       []ChartData
 }
 
 // ChartData is one chart: header strings plus the drawn series. Color must be
@@ -80,38 +79,52 @@ var statusWindows = []struct {
 }{{10, "10m"}, {30, "30m"}, {60, "1h"}, {180, "3h"}, {720, "12h"}, {1440, "24h"}, {10080, "7d"}, {43200, "30d"}}
 
 templ StatusPage(d StatusData) {
-	@Layout(T("status.title"), "status", d.Nav, Flash{}) {
-		@PageHeader(T("status.title"), T("status.subtitle")) {
+	@Layout(T(ctx, "status.title"), "status", d.Nav, Flash{}) {
+		@PageHeader(T(ctx, "status.title"), T(ctx, "status.subtitle")) {
 			@statusSettings(d)
 		}
-		<div class="mb-8 grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
-			if d.Healthy {
-				@StatTile("activity", T("status.ok"), T("status.health"), "st-health", "text-green-500")
-			} else {
-				@StatTile("activity", T("status.err"), T("status.health"), "st-health", "text-destructive")
-			}
-			@StatTile("clock", d.Uptime, T("status.uptime"), "st-uptime", "")
-			@StatTile("target", d.HitPct, T("status.hits"), "st-hit", "")
-			@StatTile("hard-drive", d.Bytes(d.Global.StoredBytes), T("status.stored"), "st-stored", "")
-			@StatTile("package", Count(d.Global.Paths), T("kpi.paths"), "st-paths", "")
-			@StatTile("download", Count(d.NarServed), T("status.nars"), "st-nars", "")
-			@StatTile("network", Count(d.Requests), T("status.reqs"), "st-req", "")
-			@StatTile("shield", Count(d.AuthFails), T("status.authfail"), "st-auth", "")
-			@StatTile("upload", Count(d.PathsPushed), T("status.pushed"), "st-pushed", "")
-			@StatTile("copy", Count(d.PathsAdopted), T("status.adopted"), "st-adopted", "")
-			@StatTile("boxes", Count(d.ChunksRecv), T("status.chunks"), "st-chunks", "")
-			@StatTile("layers", Count(d.ChunksDedup), T("status.deduped"), "st-dedup", "")
+		// Twelve equal tiles asked the reader to rank twelve numbers themselves.
+		// The page answers one question first — is it up — so health, uptime and
+		// hit rate lead, the live charts come next, and the counters settle
+		// underneath as a readout you consult rather than scan.
+		<div class="mb-8 flex flex-wrap items-baseline gap-x-10 gap-y-3 border-y py-4">
+			<div class="flex items-baseline gap-2.5">
+				<span
+					id="st-health"
+					class={ "font-mono text-3xl font-medium leading-none tracking-tight", healthTone(d.Healthy) }
+				>
+					if d.Healthy {
+						{ T(ctx, "status.ok") }
+					} else {
+						{ T(ctx, "status.err") }
+					}
+				</span>
+				<span class="text-xs text-muted-foreground">{ T(ctx, "status.health") }</span>
+			</div>
+			@Readout(d.Uptime, T(ctx, "status.uptime"), "st-uptime", "")
+			@Readout(d.HitPct, T(ctx, "status.hits"), "st-hit", "")
 		</div>
-		<div class="grid gap-6 lg:grid-cols-2">
+		<div class="mb-8 grid gap-6 lg:grid-cols-2">
 			for _, c := range d.Charts {
 				@statusChart(c)
 			}
 		</div>
-		<p id="status-updated" class="mt-6 text-center text-xs text-muted-foreground">{ T("status.updated") } { d.Updated }</p>
+		@StatRow() {
+			@StatTile("hard-drive", d.Bytes(d.Global.StoredBytes), T(ctx, "status.stored"), "st-stored", "")
+			@StatTile("package", Count(d.Global.Paths), T(ctx, "kpi.paths"), "st-paths", "")
+			@StatTile("download", Count(d.NarServed), T(ctx, "status.nars"), "st-nars", "")
+			@StatTile("network", Count(d.Requests), T(ctx, "status.reqs"), "st-req", "")
+			@StatTile("shield", Count(d.AuthFails), T(ctx, "status.authfail"), "st-auth", failTone(d.AuthFails))
+			@StatTile("upload", Count(d.PathsPushed), T(ctx, "status.pushed"), "st-pushed", "")
+			@StatTile("copy", Count(d.PathsAdopted), T(ctx, "status.adopted"), "st-adopted", "")
+			@StatTile("boxes", Count(d.ChunksRecv), T(ctx, "status.chunks"), "st-chunks", "")
+			@StatTile("layers", Count(d.ChunksDedup), T(ctx, "status.deduped"), "st-dedup", "")
+		}
+		<p id="status-updated" class="mt-6 text-center font-mono text-xs text-muted-foreground tabular-nums">{ T(ctx, "status.updated") } { d.Updated }</p>
 		@templ.JSONScript("status-poll", map[string]any{
 			"url": dataURL(d), "rate": d.Rate,
-			"ok": T("status.ok"), "err": T("status.err"),
-			"updated": T("status.updated"), "peak": T("status.peak"),
+			"ok": T(ctx, "status.ok"), "err": T(ctx, "status.err"),
+			"updated": T(ctx, "status.updated"), "peak": T(ctx, "status.peak"),
 		})
 		@statusPollScript()
 	}
@@ -123,8 +136,8 @@ templ StatusPage(d StatusData) {
 templ statusSettings(d StatusData) {
 	@sheet.Sheet(sheet.Props{ID: "status-settings"}) {
 		@sheet.Trigger(sheet.TriggerProps{For: "status-settings"}) {
-			@WithTooltip(T("status.settings")) {
-				@button.Button(button.Props{Variant: button.VariantOutline, Size: button.SizeIcon, Type: button.TypeButton, Attributes: templ.Attributes{"aria-label": T("status.settings")}}) {
+			@WithTooltip(T(ctx, "status.settings")) {
+				@button.Button(button.Props{Variant: button.VariantOutline, Size: button.SizeIcon, Type: button.TypeButton, Attributes: templ.Attributes{"aria-label": T(ctx, "status.settings")}}) {
 					@Icon("settings")
 				}
 			}
@@ -132,12 +145,12 @@ templ statusSettings(d StatusData) {
 		@sheet.Content() {
 			@sheet.Header() {
 				@sheet.Title() {
-					{ T("status.settings") }
+					{ T(ctx, "status.settings") }
 				}
 			}
 			<div class="space-y-6 p-4">
 				<div class="space-y-2">
-					<p class="text-sm font-medium">{ T("status.window") }</p>
+					<p class="text-sm font-medium">{ T(ctx, "status.window") }</p>
 					<div class="flex flex-wrap gap-1">
 						for _, wo := range statusWindows {
 							@button.Button(button.Props{Href: windowURL(d, wo.Min), Size: button.SizeSm, Variant: segVariant(wo.Min == d.Window)}) {
@@ -147,20 +160,20 @@ templ statusSettings(d StatusData) {
 					</div>
 				</div>
 				<form method="get" action="/admin/status" class="space-y-2">
-					<p class="text-sm font-medium">{ T("status.range") }</p>
+					<p class="text-sm font-medium">{ T(ctx, "status.range") }</p>
 					<input type="hidden" name="rate" value={ strconv.Itoa(d.Rate) }/>
 					@datepicker.DatePicker(datepicker.Props{
 						Name: "from", EndName: "to", Mode: calendar.SelectionModeRange,
 						Value: parseDate(d.From), EndValue: parseDate(d.To),
-						Placeholder: T("status.from"), EndPlaceholder: T("status.to"),
+						Placeholder: T(ctx, "status.from"), EndPlaceholder: T(ctx, "status.to"),
 					})
 					@button.Button(button.Props{Type: button.TypeSubmit, Size: button.SizeSm, Variant: segVariant(d.Window == 0), Class: "w-full"}) {
 						@Icon("calendar")
-						<span>{ T("status.apply") }</span>
+						<span>{ T(ctx, "status.apply") }</span>
 					}
 				</form>
 				<div class="space-y-2">
-					<p class="text-sm font-medium">{ T("status.autorefresh") }</p>
+					<p class="text-sm font-medium">{ T(ctx, "status.autorefresh") }</p>
 					<div class="flex flex-wrap gap-1">
 						for _, rt := range statusRates {
 							@button.Button(button.Props{Href: rateURL(d, rt), Size: button.SizeSm, Variant: segVariant(rt == d.Rate)}) {
@@ -181,37 +194,53 @@ templ statusChart(c ChartData) {
 				{ c.Label }
 			}
 			<div class="flex items-baseline gap-2">
-				<span id={ "cur-" + c.ID } class="text-lg font-semibold tabular-nums">{ c.Cur }</span>
+				<span id={ "cur-" + c.ID } class="font-mono text-lg font-medium tabular-nums">{ c.Cur }</span>
 				@badge.Badge(badge.Props{ID: "peak-" + c.ID, Variant: badge.VariantSecondary, Class: peakClass(c.Peak)}) {
 					if c.Peak != "" {
-						{ T("status.peak") } { c.Peak }
+						{ T(ctx, "status.peak") } { c.Peak }
 					}
 				}
 			</div>
 		}
-		@card.Content() {
+		@card.Content(card.ContentProps{Class: "relative"}) {
+			<p id={ "empty-" + c.ID } class={ "absolute inset-0 flex items-center justify-center text-sm text-muted-foreground", sparseClass(c.Points) }>{ T(ctx, "status.collecting") }</p>
 			@chart.Chart(chart.Props{
-				ID:          "chart-" + c.ID,
-				Variant:     chart.VariantLine,
-				Class:       "h-48",
+				ID:      "chart-" + c.ID,
+				Variant: chart.VariantLine,
+				Class:   "h-48",
+				// Time labels, because a series with no x axis cannot be read;
+				// horizontal grid only, because the level is what you compare and
+				// vertical rules just fence the line in. The ceiling is a round
+				// number above the peak (chartMax), so ticks land on round values
+				// and the axis stops rescaling under the line on every poll.
 				ShowXAxis:   true,
 				ShowYAxis:   true,
+				ShowXLabels: true,
 				ShowYLabels: true,
+				ShowYGrid:   true,
+				BeginAtZero: chart.Bool(true),
+				YMax:        chartMax(c.Points),
 				Data: chart.Data{
 					Labels: c.Labels,
 					Datasets: []chart.Dataset{{
-						Label:           c.Label,
-						Data:            c.Points,
-						BorderColor:     c.Color,
-						BackgroundColor: chartFill(c.Color),
-						BorderWidth:     2,
-						Tension:         0.3,
-						Fill:            true,
+						Label:       c.Label,
+						Data:        c.Points,
+						BorderColor: c.Color,
+						BorderWidth: 2,
+						Tension:     0.3,
 					}},
 				},
 			})
 		}
 	}
+}
+
+// sparseClass hides the "collecting" overlay once a chart has a line to draw.
+func sparseClass(points []float64) string {
+	if len(points) >= 2 {
+		return "hidden"
+	}
+	return ""
 }
 
 // peakClass hides the peak badge until there is a peak; the poll script
@@ -221,11 +250,6 @@ func peakClass(peak string) string {
 		return "hidden"
 	}
 	return ""
-}
-
-// chartFill is the 15%-alpha area fill for a literal oklch line color.
-func chartFill(color string) string {
-	return strings.TrimSuffix(color, ")") + " / 0.15)"
 }
 
 // statusPollScript applies the /admin/status/data payload in place: KPI tile
@@ -241,6 +265,65 @@ templ statusPollScript() {
 				var el = document.getElementById(id);
 				if (el) el.textContent = v;
 			}
+			// niceMax mirrors views.chartMax: the next 1/2/5×10ⁿ above the peak.
+			function niceMax(vals) {
+				var m = 0;
+				for (var i = 0; i < vals.length; i++) {
+					if (vals[i] > m) m = vals[i];
+				}
+				if (m <= 0) return 1;
+				var e = Math.pow(10, Math.floor(Math.log10(m)));
+				var steps = [1, 2, 5, 10];
+				for (var j = 0; j < steps.length; j++) {
+					if (m <= steps[j] * e) return steps[j] * e;
+				}
+				return 10 * e;
+			}
+			// scaleOpts reaches a chart's own config, never inst.options: that is a
+			// resolver proxy, and assigning an object into it writes the proxy back
+			// through itself until the stack runs out.
+			function scaleOpts(inst, axis) {
+				var o = inst.config.options || (inst.config.options = {});
+				o.scales = o.scales || {};
+				o.scales[axis] = o.scales[axis] || {};
+				return o.scales[axis];
+			}
+			// Time labels lie flat and Chart.js drops whatever will not fit, rather
+			// than raking every timestamp at 45 degrees. templui exposes no tick
+			// options, so this is done on the live instances.
+			function tuneAxes() {
+				if (!window.Chart) return;
+				document.querySelectorAll('canvas[data-tui-chart-id]').forEach(function (cv) {
+					var inst = Chart.getChart(cv.id);
+					if (!inst) return;
+					var x = scaleOpts(inst, 'x');
+					if (x.ticks && x.ticks.maxRotation === 0) return;
+					x.ticks = Object.assign({}, x.ticks, {
+						maxRotation: 0,
+						minRotation: 0,
+						autoSkipPadding: 16,
+					});
+					inst.update('none');
+				});
+			}
+			// templui builds its charts on its own listener, and rebuilds them all
+			// on a theme switch to pick up the new surface colours — so there is no
+			// single moment to hook, and a rebuilt instance is back on Chart.js'
+			// defaults. Sweep for a few seconds after either event; tuneAxes is a
+			// no-op on an instance it has already done.
+			function tuneBurst() {
+				var tries = 0;
+				var timer = setInterval(function () {
+					tuneAxes();
+					if (++tries > 12) clearInterval(timer);
+				}, 250);
+			}
+			tuneBurst();
+			var themeWatch = new MutationObserver(tuneBurst);
+			themeWatch.observe(document.documentElement, {
+				attributes: true,
+				attributeFilter: ['class', 'data-palette'],
+			});
 			function fmtLabel(ms, longSpan) {
 				var t = new Date(ms);
 				var hm =
@@ -256,7 +339,7 @@ templ statusPollScript() {
 				var h = document.getElementById('st-health');
 				if (h) {
 					h.textContent = d.healthy ? cfg.ok : cfg.err;
-					h.classList.toggle('text-green-500', d.healthy);
+					h.classList.toggle('text-success', d.healthy);
 					h.classList.toggle('text-destructive', !d.healthy);
 				}
 				setText('st-uptime', d.uptime);
@@ -275,6 +358,8 @@ templ statusPollScript() {
 				Object.keys(d.charts || {}).forEach(function (k) {
 					var c = d.charts[k];
 					setText('cur-' + k, c.cur);
+					var em = document.getElementById('empty-' + k);
+					if (em) em.classList.toggle('hidden', c.points.length >= 2);
 					var pk = document.getElementById('peak-' + k);
 					if (pk) {
 						pk.classList.toggle('hidden', !c.peak);
@@ -285,14 +370,32 @@ templ statusPollScript() {
 					inst.data.labels = c.points.map(function (p) {
 						return fmtLabel(p[0], longSpan);
 					});
-					inst.data.datasets[0].data = c.points.map(function (p) {
+					var vals = c.points.map(function (p) {
 						return p[1];
 					});
+					inst.data.datasets[0].data = vals;
+					// Same ceiling rule as the server render — see chartMax.
+					scaleOpts(inst, 'y').max = niceMax(vals);
 					inst.update('none');
 				});
+				tuneAxes();
 			}
-			setInterval(function () {
-				fetch(cfg.url, { headers: { Accept: 'application/json' } })
+			// A boosted navigation swaps the body out from under this script, so
+			// the poller has to notice its own page is gone: nothing else would
+			// stop it, and every visit to this page would leave one more behind,
+			// all of them polling.
+			var timer = setInterval(function () {
+				if (!cfgEl.isConnected) {
+					clearInterval(timer);
+					themeWatch.disconnect();
+					return;
+				}
+				fetch(cfg.url, {
+						headers: { Accept: 'application/json' },
+						// The admin's short private cache would hand the poller its own
+						// last answer back at this rate; it wants the live one.
+						cache: 'no-store',
+					})
 					.then(function (r) {
 						if (!r.ok) throw 0;
 						return r.json();

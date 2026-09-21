@@ -11,7 +11,7 @@ import (
 	"os"
 	"os/signal"
 	"runtime"
-	"sort"
+	"slices"
 	"strings"
 	"sync"
 	"syscall"
@@ -21,21 +21,21 @@ import (
 	"github.com/klauspost/compress/zstd"
 
 	"github.com/stubbedev/xilo/internal/config"
+	"github.com/stubbedev/xilo/internal/server/views"
 	"github.com/stubbedev/xilo/internal/storage"
 	"github.com/stubbedev/xilo/internal/store"
 )
 
 type Server struct {
-	cfg       *config.Config
-	db        *store.DB
-	sts       map[string]storage.Storage // named blob backends
-	enc       *zstd.Encoder              // EncodeAll — safe for concurrent use
-	dec       *zstd.Decoder              // DecodeAll — safe for concurrent use
-	sess      *sessions
-	ceremony  ceremonies // in-flight WebAuthn challenges
-	wanOnce   sync.Once
-	wan       *webauthn.WebAuthn
-	wanErr    error
+	cfg      *config.Config
+	db       *store.DB
+	sts      map[string]storage.Storage // named blob backends
+	enc      *zstd.Encoder              // EncodeAll — safe for concurrent use
+	dec      *zstd.Decoder              // DecodeAll — safe for concurrent use
+	sess     *sessions
+	ceremony ceremonies // in-flight WebAuthn challenges
+	// webAuthn builds the relying party on first use (memoized).
+	webAuthn  func() (*webauthn.WebAuthn, error)
 	uploadSem chan struct{} // bounds concurrent server-side chunk encode+store
 	logins    *loginLimiter // throttles bcrypt attempts per IP
 	niCache   *narinfoCache // rendered+signed narinfo bodies
@@ -52,6 +52,11 @@ type Server struct {
 	// lastSavedCounters is the JSON of the last persisted metrics snapshot;
 	// only the status-sampler goroutine touches it.
 	lastSavedCounters string
+	// gcDone tracks the sweeper goroutine so RunContext can wait for an
+	// in-flight sweep before returning: the caller closes the DB right after,
+	// and store.DB.Close() closes the writer channel, so a sweep still
+	// deleting rows would panic sending on it.
+	gcDone sync.WaitGroup
 }
 
 func New(cfg *config.Config, db *store.DB, sts map[string]storage.Storage) (*Server, error) {
@@ -82,6 +87,7 @@ func New(cfg *config.Config, db *store.DB, sts map[string]storage.Storage) (*Ser
 		logins:    newLoginLimiter(),
 		niCache:   newNarinfoCache(16384), // ~64B/key + body ~600B ⇒ ~10MB cap
 		vfCache:   newVerifyCache(8192),   // 32B keys ⇒ well under 1MB
+		webAuthn:  newWebAuthn(cfg),
 	}
 	s.restoreCounters()
 	return s, nil
@@ -123,11 +129,17 @@ func (s *Server) Handler() http.Handler {
 
 	s.registerAdmin(mux)
 	s.registerAdminAPI(mux)
-	if s.cfg.MultiTenant {
+	if s.cfg.SelfService {
 		s.registerTenancy(mux)
 	}
 	s.registerPasskeyRoutes(mux)
 	s.registerStatic(mux)
+	if os.Getenv("XILO_DEV") != "" {
+		// `just dev`: the page holds this stream open; when air restarts the
+		// binary the stream drops, and the reconnect is the reload signal.
+		views.DevMode = true
+		mux.HandleFunc("GET /dev/events", devEvents)
+	}
 	mux.HandleFunc("GET /healthz", s.handleHealth)
 	mux.HandleFunc("GET /metrics", s.handleMetrics)
 	mux.HandleFunc("GET /", s.handleIndex)
@@ -145,6 +157,10 @@ func (s *Server) RunContext(ctx context.Context) error {
 	// instead of writing to a closed DB.
 	ctx, stop := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
 	defer stop()
+	// Cancel the loops on every return path, not just the signalled one, and
+	// let a sweep already running finish before the caller closes the DB.
+	ctx, stopBG := context.WithCancel(ctx)
+	defer func() { stopBG(); s.gcDone.Wait() }()
 	s.startGC(ctx)
 	s.startAuditPrune(ctx)
 	s.startStatusSampler(ctx)
@@ -176,10 +192,37 @@ func (s *Server) RunContext(ctx context.Context) error {
 	}
 }
 
+// uiLocale is the language to render this request in: the signed-in user's
+// saved preference, else what the browser asked for, else English.
+//
+// ponytail: one extra currentUser (a session hit plus a user row) per admin
+// request. Human-paced traffic, so it stays cheaper than caching it; if the
+// admin ever gets hot, memoize the session→user lookup instead.
+func (s *Server) uiLocale(r *http.Request) string {
+	if u := s.currentUser(r); u != nil && u.Locale != "" {
+		return u.Locale
+	}
+	return views.MatchLocale(r.Header.Get("Accept-Language"))
+}
+
+// isAdminPage reports whether this is a plain GET of an admin page — the only
+// responses short-lived caching is meant for. The status poller's JSON is
+// excluded by asking for it with `cache: 'no-store'` at the call site.
+func isAdminPage(r *http.Request) bool {
+	return (r.Method == http.MethodGet || r.Method == http.MethodHead) &&
+		strings.HasPrefix(r.URL.Path, "/admin")
+}
+
 // middleware wraps the mux with panic recovery + request logging.
 func (s *Server) middleware(h http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		start := time.Now()
+		// Everything that renders UI gets the viewer's language on its
+		// context, where views.T reads it. The binary-cache protocol renders
+		// none and is the hot path, so it skips the lookup entirely.
+		if !isCacheTraffic(r.URL.Path) {
+			r = r.WithContext(views.WithLocale(r.Context(), s.uiLocale(r)))
+		}
 		// Baseline hardening headers. The admin UI relies on inline scripts and
 		// onclick handlers, so script/style stay 'unsafe-inline'; the CSP still
 		// locks down object/base-uri/frame-ancestors and confines everything
@@ -194,6 +237,16 @@ func (s *Server) middleware(h http.Handler) http.Handler {
 				"object-src 'none'; base-uri 'none'; frame-ancestors 'none'")
 		if s.secureCookies() {
 			hdr.Set("Strict-Transport-Security", "max-age=63072000; includeSubDomains")
+		}
+		// A few seconds of private caching is what the hover-preload spends: the
+		// page fetched when the pointer lands on a link has to still be in the
+		// browser's cache when the click arrives. Vary: Cookie keeps it honest —
+		// every admin POST answers with a flash cookie, so the redirect that
+		// follows an action carries a different Cookie header than the preload
+		// did and cannot be served the copy taken before the change.
+		if isAdminPage(r) {
+			hdr.Set("Cache-Control", "private, max-age=5")
+			hdr.Set("Vary", "Cookie")
 		}
 		lw := &logWriter{ResponseWriter: w, status: http.StatusOK}
 		defer func() {
@@ -252,12 +305,39 @@ func (s *Server) recordAudit(r *http.Request, status int, elapsed time.Duration)
 	var actor string
 	if u := s.currentUser(r); u != nil {
 		uid, actor = u.ID, u.Name
+	} else if t, ok := s.db.TokenBySecret(extractToken(r), time.Now().Unix()); ok {
+		// Token-driven API call: the token's name is the actor (UserID stays 0,
+		// which is how the activities page tells tokens from people).
+		actor = t.Name
 	}
 	if err := s.db.Audit(store.AuditEntry{
 		UserID: uid, Actor: actor, Method: r.Method, Path: r.URL.Path, Status: status,
 		IP: s.clientIP(r), UserAgent: r.UserAgent(), DurationMs: elapsed.Milliseconds(),
 	}); err != nil {
 		log.Printf("audit: %v", err)
+	}
+}
+
+// devEvents is a keepalive-only SSE stream for the dev reload script (see
+// devReloadScript in layout.templ). Registered only under XILO_DEV.
+func devEvents(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	rc := http.NewResponseController(w)
+	fmt.Fprint(w, ": ready\n\n")
+	_ = rc.Flush()
+	t := time.NewTicker(15 * time.Second)
+	defer t.Stop()
+	for {
+		select {
+		case <-r.Context().Done():
+			return
+		case <-t.C:
+			fmt.Fprint(w, ": ping\n\n")
+			if rc.Flush() != nil {
+				return
+			}
+		}
 	}
 }
 
@@ -302,22 +382,24 @@ func (s *Server) startGC(ctx context.Context) {
 		return
 	}
 	log.Printf("gc: background sweep every %s (retention=%q grace=%q)", interval, s.cfg.GC.Retention, s.cfg.GC.Grace)
-	go func() {
+	s.gcDone.Go(func() {
 		t := time.NewTicker(interval)
 		defer t.Stop()
+		// Sweep once at startup: a ticker alone means a box redeployed or
+		// rebooted more often than gc.interval never sweeps at all.
 		for {
-			select {
-			case <-ctx.Done():
-				return
-			case <-t.C:
-			}
 			if del, freed, err := s.runGC(ctx); err != nil {
 				log.Printf("gc: %v", err)
 			} else if del > 0 {
 				log.Printf("gc: swept %d chunks, freed %d bytes", del, freed)
 			}
+			select {
+			case <-ctx.Done():
+				return
+			case <-t.C:
+			}
 		}
-	}()
+	})
 }
 
 // Audit pruning runs on its own schedule, independent of the chunk sweeper, so
@@ -342,9 +424,9 @@ func (s *Server) startAuditPrune(ctx context.Context) {
 	go func() {
 		t := time.NewTicker(auditPruneEvery)
 		defer t.Stop()
-		// First pass on the first tick, never synchronously at startup: touching
-		// the DB before a tick would race a shutdown that closes it (same reason
-		// startGC waits for its ticker).
+		// First pass on the first tick, never synchronously at startup:
+		// touching the DB before a tick would race a shutdown that closes it.
+		// (The sweeper does sweep at startup, but RunContext waits it out.)
 		for {
 			select {
 			case <-ctx.Done():
@@ -466,7 +548,7 @@ func (s *Server) storageNames() []string {
 			names = append(names, n)
 		}
 	}
-	sort.Strings(names)
+	slices.Sort(names)
 	return append([]string{s.cfg.DefaultStorage}, names...)
 }
 
@@ -505,6 +587,13 @@ func (s *Server) cache(w http.ResponseWriter, r *http.Request) (*store.Cache, bo
 	}
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return nil, false
+	}
+	// A suspended account serves nothing. Checked here because every
+	// binary-cache handler comes through this resolver, so the rule cannot be
+	// missed by a handler added later.
+	if s.db.AccountStatus(c.AccountID) == store.StatusSuspended {
+		http.Error(w, "account suspended", http.StatusForbidden)
 		return nil, false
 	}
 	return c, true

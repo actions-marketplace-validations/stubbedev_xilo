@@ -5,13 +5,11 @@ import (
 
 	"github.com/stubbedev/xilo/internal/store"
 
-	"github.com/templui/templui/components/badge"
 	"github.com/templui/templui/components/button"
-	"github.com/templui/templui/components/card"
-	"github.com/templui/templui/components/form"
+	"github.com/templui/templui/components/dialog"
 	"github.com/templui/templui/components/input"
 	"github.com/templui/templui/components/inputotp"
-	"github.com/templui/templui/components/table"
+	"github.com/templui/templui/components/selectbox"
 )
 
 // AccountData is everything the personal account page renders.
@@ -25,178 +23,207 @@ type AccountData struct {
 }
 
 // Account is the personal page: sign-in identity and credentials.
+//
+// Every credential is one row — what it is, what it currently says, and the
+// control that changes it — because that is what these are: settings with a
+// current value, not forms waiting to be filled in. The forms live in the
+// dialogs the rows open, which is also what keeps the filled Save button
+// where it belongs: on the thing that commits, never on the page ground.
 templ Account(d AccountData) {
-	@Layout(T("nav.account"), "account", d.Nav, d.Flash) {
-		@PageHeader(T("nav.account"), T("acct.subtitle")+" "+d.User.Name+".")
-		<div class="grid gap-6">
-			@card.Card() {
-				@card.Header() {
-					@card.Title() {
-						{ T("acct.email") }
+	@Layout(T(ctx, "nav.account"), "account", d.Nav, d.Flash) {
+		@PageHeader(T(ctx, "nav.account"), Tf(ctx, "acct.subtitle", d.User.Name))
+		<div class="grid gap-8">
+			@ListSection(T(ctx, "acct.signin"), nil) {
+				<div class="divide-y border-y">
+					@SettingRow(T(ctx, "acct.email"), orDash(d.User.Email)) {
+						@emailDialog(d)
 					}
-					@card.Description() {
-						{ T("acct.emailhint") }
+					@SettingRow(T(ctx, "login.password"), "") {
+						@passwordDialog()
 					}
-				}
-				@card.Content() {
-					<form method="post" action="/admin/account/email" class="flex items-end gap-2">
-						@form.Item(form.ItemProps{Class: "flex-1"}) {
-							@form.Label(form.LabelProps{For: "email"}) {
-								{ T("acct.emailaddr") }
+					@SettingRow(T(ctx, "set.2fa"), totpState(ctx, d.TOTPEnabled)) {
+						if d.TOTPEnabled {
+							@ConfirmForm(Confirm{
+								ID:             "totp-off",
+								Action:         "/admin/account/totp/disable",
+								Title:          T(ctx, "confirm.2fa"),
+								Message:        T(ctx, "set.2fa.offmsg"),
+								ConfirmLabel:   T(ctx, "set.2fa.disable"),
+								ConfirmIcon:    "shield-off",
+								Danger:         true,
+								TriggerLabel:   T(ctx, "set.2fa.disable"),
+								TriggerIcon:    "shield-off",
+								TriggerVariant: button.VariantOutline,
+							}) {
+								@Field("totp-off-current", T(ctx, "set.current")) {
+									@input.Input(input.Props{ID: "totp-off-current", Name: "current", Type: input.TypePassword, Required: true, Attributes: templ.Attributes{"autocomplete": "current-password"}})
+								}
 							}
-							@input.Input(input.Props{ID: "email", Name: "email", Type: input.TypeEmail, Value: d.User.Email, Placeholder: T("ph.email"), Attributes: templ.Attributes{"autocomplete": "email"}})
+						} else {
+							@totpEnrollDialog()
 						}
-						@button.Button(button.Props{Type: button.TypeSubmit}) {
-							@Icon("check")
-							<span>{ T("action.save") }</span>
+					}
+				</div>
+			}
+			@ListSection(T(ctx, "set.passkeys"), sectionAction(len(d.Passkeys) > 0, passkeyAddButton())) {
+				if len(d.Passkeys) == 0 {
+					@EmptyState("fingerprint-pattern", T(ctx, "empty.none")) {
+						@passkeyAddButton()
+					}
+				} else {
+					<div class="divide-y border-y">
+						for _, pk := range d.Passkeys {
+							<div class="flex items-center justify-between gap-3 py-2">
+								<div class="flex min-w-0 items-center gap-2 text-sm">
+									@Icon("fingerprint-pattern")
+									<span class="truncate font-medium">{ pk.Name }</span>
+									@Meta() {
+										{ Ago(ctx, pk.Created) }
+									}
+								</div>
+								@ConfirmForm(Confirm{
+									ID:             "pk-" + strconv.FormatInt(pk.ID, 10),
+									Action:         "/admin/passkeys/" + strconv.FormatInt(pk.ID, 10) + "/delete",
+									Title:          T(ctx, "pk.removetitle"),
+									Message:        Tf(ctx, "pk.removemsg", pk.Name),
+									ConfirmLabel:   T(ctx, "action.remove"),
+									ConfirmIcon:    "trash-2",
+									Danger:         true,
+									TriggerIcon:    "trash-2",
+									IconOnly:       true,
+									TriggerTooltip: T(ctx, "action.remove"),
+									TriggerVariant: button.VariantGhost,
+								})
+							</div>
 						}
-					</form>
+					</div>
 				}
 			}
-			@card.Card() {
-				@card.Header() {
-					@card.Title() {
-						{ T("set.passkeys") }
-					}
-					@card.Description() {
-						{ T("set.passkeys.hint") }
-					}
-				}
-				@card.Content(card.ContentProps{Class: "space-y-3"}) {
-					if len(d.Passkeys) == 0 {
-						@EmptyState("fingerprint-pattern", T("set.passkeys.empty"))
-					} else {
-						<div class="overflow-hidden rounded-lg border">
-							@table.Table() {
-								@table.Body() {
-									for _, pk := range d.Passkeys {
-										@table.Row() {
-											@table.Cell() {
-												<div class="flex items-center gap-2 text-sm">
-													@Icon("fingerprint-pattern")
-													<span class="font-medium">{ pk.Name }</span>
-													<span class="text-muted-foreground">· { Ago(pk.Created) }</span>
-												</div>
-											}
-											@table.Cell(table.CellProps{Class: "text-right"}) {
-												@ConfirmForm(Confirm{
-													ID:             "pk-" + strconv.FormatInt(pk.ID, 10),
-													Action:         "/admin/passkeys/" + strconv.FormatInt(pk.ID, 10) + "/delete",
-													Title:          T("pk.removetitle"),
-													Message:        "“" + pk.Name + "” " + T("pk.removemsg"),
-													ConfirmLabel:   T("set.passkeys.remove"),
-													ConfirmIcon:    "trash-2",
-													Danger:         true,
-													TriggerIcon:    "trash-2",
-													IconOnly:       true,
-													TriggerTooltip: T("pk.remove"),
-													TriggerVariant: button.VariantGhost,
-												})
-											}
+			@ListSection(T(ctx, "acct.appearance"), nil) {
+				// Two preferences that apply the moment they are picked, so they
+				// have no Save and therefore no card around them.
+				<form method="post" action="/admin/account/appearance" class="divide-y border-y" onchange="if (event.target.name === 'theme' || event.target.name === 'locale') this.requestSubmit()">
+					@SettingRow(T(ctx, "acct.palette"), "") {
+						<div class="w-48">
+							@selectbox.SelectBox() {
+								@selectbox.Trigger(selectbox.TriggerProps{Name: "theme", Attributes: templ.Attributes{"aria-label": T(ctx, "acct.palette")}}) {
+									@selectbox.Value(selectbox.ValueProps{})
+								}
+								@selectbox.Content(selectbox.ContentProps{NoSearch: noSearch(len(Palettes))}) {
+									for _, p := range Palettes {
+										@selectbox.Item(selectbox.ItemProps{Value: p.ID, Selected: p.ID == d.User.Theme}) {
+											{ p.Name }
 										}
 									}
 								}
 							}
 						</div>
 					}
-					@button.Button(button.Props{Size: button.SizeSm, Type: button.TypeButton, Attributes: templ.Attributes{"onclick": "xiloPasskeyRegister()"}}) {
-						@Icon("fingerprint-pattern")
-						<span>{ T("set.passkeys.add") }</span>
-					}
-				}
-			}
-			@card.Card() {
-				@card.Header() {
-					@card.Title() {
-						{ T("set.2fa") }
-					}
-					@card.Description() {
-						{ T("set.2fa.hint") }
-					}
-				}
-				@card.Content() {
-					if d.TOTPEnabled {
-						<div class="flex items-center justify-between">
-							<div class="flex items-center gap-2 text-sm">
-								@badge.Badge(badge.Props{Variant: badge.VariantDefault, Class: "gap-1"}) {
-									@Icon("shield-check")
-									<span>{ T("set.2fa.on") }</span>
+					@SettingRow(T(ctx, "acct.language"), "") {
+						<div class="w-48">
+							@selectbox.SelectBox() {
+								@selectbox.Trigger(selectbox.TriggerProps{Name: "locale", Attributes: templ.Attributes{"aria-label": T(ctx, "acct.language")}}) {
+									@selectbox.Value(selectbox.ValueProps{Placeholder: T(ctx, "acct.langauto")})
 								}
-							</div>
-							@ConfirmForm(Confirm{
-								ID:             "totp-off",
-								Action:         "/admin/account/totp/disable",
-								Title:          T("confirm.2fa"),
-								Message:        T("set.2fa.offmsg"),
-								ConfirmLabel:   T("set.2fa.disable"),
-								ConfirmIcon:    "shield-off",
-								Danger:         true,
-								TriggerLabel:   T("set.2fa.disable"),
-								TriggerIcon:    "shield-off",
-								TriggerVariant: button.VariantOutline,
-							}) {
-								@Field("totp-off-current", T("set.current")) {
-									@input.Input(input.Props{ID: "totp-off-current", Name: "current", Type: input.TypePassword, Required: true, Attributes: templ.Attributes{"autocomplete": "current-password"}})
+								@selectbox.Content(selectbox.ContentProps{NoSearch: noSearch(len(Locales) + 1)}) {
+									@selectbox.Item(selectbox.ItemProps{Value: "", Selected: d.User.Locale == ""}) {
+										{ T(ctx, "acct.langauto") }
+									}
+									for _, l := range Locales {
+										@selectbox.Item(selectbox.ItemProps{Value: l.ID, Selected: l.ID == d.User.Locale}) {
+											{ l.Name }
+										}
+									}
 								}
 							}
 						</div>
-					} else {
-						<div class="flex items-center justify-between">
-							<p class="text-sm text-muted-foreground">{ T("set.2fa.protect") }</p>
-							<form method="post" action="/admin/account/totp/enroll">
-								@button.Button(button.Props{Type: button.TypeSubmit}) {
-									@Icon("shield")
-									<span>{ T("set.2fa.enable") }</span>
-								}
-							</form>
-						</div>
 					}
-				}
-			}
-			if d.CanCreateOrg {
-				@card.Card() {
-					@card.Header(card.HeaderProps{Class: "flex-row items-center justify-between space-y-0"}) {
-						@card.Title() {
-							{ T("acct.orgs") }
-						}
-						@newOrgDialog("/admin/neworg")
-					}
-					@card.Content() {
-						<p class="text-sm text-muted-foreground">{ T("acct.orghint") }</p>
-					}
-				}
-			}
-			@card.Card() {
-				@card.Header() {
-					@card.Title() {
-						{ T("login.password") }
-					}
-					@card.Description() {
-						{ T("set.password") }
-					}
-				}
-				@card.Content() {
-					<form method="post" action="/admin/account/password" class="space-y-4">
-						@Field("cur-pw", T("set.current")) {
-							@input.Input(input.Props{ID: "cur-pw", Name: "current", Type: input.TypePassword, Required: true, Attributes: templ.Attributes{"autocomplete": "current-password"}})
-						}
-						@Field("new-pw", T("set.new")) {
-							@input.Input(input.Props{ID: "new-pw", Name: "new", Type: input.TypePassword, Required: true, Attributes: pwCheckAttrs()})
-						}
-						@Field("new-pw2", T("set.new2")) {
-							@input.Input(input.Props{ID: "new-pw2", Name: "confirm", Type: input.TypePassword, Required: true, Attributes: pwCheckAttrs()})
-						}
-						<div class="flex items-center justify-between">
-							<span id="pw-hint" class="text-sm"></span>
-							@button.Button(button.Props{Type: button.TypeSubmit}) {
-								@Icon("check")
-								<span>{ T("set.update") }</span>
-							}
-						</div>
-					</form>
-				}
+				</form>
 			}
 		</div>
+	}
+}
+
+// emailDialog changes the sign-in address.
+templ emailDialog(d AccountData) {
+	@dialog.Dialog(dialog.Props{ID: "dlg-email"}) {
+		@dialog.Trigger(dialog.TriggerProps{For: "dlg-email"}) {
+			@rowOpener("square-pen", T(ctx, "action.edit"))
+		}
+		@DialogBox(T(ctx, "acct.email"), T(ctx, "acct.emailhint"), false) {
+			<form method="post" action="/admin/account/email" class="mt-2 space-y-4">
+				@Field("email", T(ctx, "acct.emailaddr")) {
+					@input.Input(input.Props{ID: "email", Name: "email", Type: input.TypeEmail, Value: d.User.Email, Placeholder: T(ctx, "ph.email"), Attributes: templ.Attributes{"autocomplete": "email"}})
+				}
+				@DialogFooter("dlg-email", "check", T(ctx, "action.save"))
+			</form>
+		}
+	}
+}
+
+// passwordDialog is the change-password form. The strength verdict is the
+// server's (hx-post to the check endpoint), rendered under the fields.
+templ passwordDialog() {
+	@dialog.Dialog(dialog.Props{ID: "dlg-pw"}) {
+		@dialog.Trigger(dialog.TriggerProps{For: "dlg-pw"}) {
+			@rowOpener("square-pen", T(ctx, "action.edit"))
+		}
+		@DialogBox(T(ctx, "login.password"), T(ctx, "set.password"), false) {
+			<form method="post" action="/admin/account/password" class="mt-2 space-y-4">
+				@Field("cur-pw", T(ctx, "set.current")) {
+					@input.Input(input.Props{ID: "cur-pw", Name: "current", Type: input.TypePassword, Required: true, Attributes: templ.Attributes{"autocomplete": "current-password"}})
+				}
+				@Field("new-pw", T(ctx, "set.new")) {
+					@input.Input(input.Props{ID: "new-pw", Name: "new", Type: input.TypePassword, Required: true, Attributes: pwCheckAttrs()})
+				}
+				@Field("new-pw2", T(ctx, "set.new2")) {
+					@input.Input(input.Props{ID: "new-pw2", Name: "confirm", Type: input.TypePassword, Required: true, Attributes: pwCheckAttrs()})
+				}
+				<span id="pw-hint" class="block text-sm"></span>
+				@DialogFooter("dlg-pw", "check", T(ctx, "action.save"))
+			</form>
+		}
+	}
+}
+
+// totpEnrollDialog is the enrolment step. The dialog is on the page and opens
+// like any other; the same click asks the server for a secret and fills the
+// body with the QR, because there is nothing to draw until one exists.
+templ totpEnrollDialog() {
+	@dialog.Dialog(dialog.Props{ID: "dlg-totp"}) {
+		@dialog.Trigger(dialog.TriggerProps{For: "dlg-totp"}) {
+			@button.Button(button.Props{
+				Size: button.SizeSm, Variant: button.VariantOutline, Type: button.TypeButton,
+				Attributes: templ.Attributes{
+					"hx-post":   "/admin/account/totp/enroll",
+					"hx-target": "#totp-body",
+					"hx-swap":   "innerHTML",
+				},
+			}) {
+				@Icon("shield")
+				<span>{ T(ctx, "set.2fa.enable") }</span>
+			}
+		}
+		@DialogBox(T(ctx, "set.enroll"), T(ctx, "set.enrollhint"), false) {
+			<div id="totp-body" class="mt-2"></div>
+		}
+	}
+}
+
+// passkeyAddButton starts the browser's own passkey ceremony.
+templ passkeyAddButton() {
+	@button.Button(button.Props{Size: button.SizeSm, Variant: button.VariantOutline, Type: button.TypeButton, Attributes: templ.Attributes{"onclick": "xiloPasskeyRegister()"}}) {
+		@Icon("plus")
+		<span>{ T(ctx, "action.add") }</span>
+	}
+}
+
+// rowOpener is the control that ends a SettingRow: outline, small, labelled —
+// it opens a dialog, so it is never the filled button.
+templ rowOpener(icon, label string) {
+	@button.Button(button.Props{Size: button.SizeSm, Variant: button.VariantOutline, Type: button.TypeButton}) {
+		@Icon(icon)
+		<span>{ label }</span>
 	}
 }
 
@@ -218,56 +245,52 @@ func pwCheckAttrs() templ.Attributes {
 templ PwHint(state string) {
 	switch state {
 		case "short":
-			<span class="text-yellow-500">{ T("set.pw.short") }</span>
+			<span class="text-warning">{ T(ctx, "set.pw.short") }</span>
 		case "mismatch":
-			<span class="text-yellow-500">{ T("set.pw.mismatch") }</span>
+			<span class="text-warning">{ T(ctx, "flash.pwmismatch") }</span>
 		case "weak":
-			<span class="text-yellow-500">{ T("set.pw.weak") }</span>
+			<span class="text-warning">{ T(ctx, "set.pw.weak") }</span>
 		case "strong":
-			<span class="text-green-500">{ T("set.pw.strong") }</span>
+			<span class="text-success">{ T(ctx, "set.pw.strong") }</span>
 	}
 }
 
-templ TOTPEnroll(nav Nav, qrDataURI, secret string) {
-	@totpEnrollPage(nav, qrDataURI, secret, "")
-}
-
-templ TOTPEnrollErr(nav Nav, qrDataURI, secret, errMsg string) {
-	@totpEnrollPage(nav, qrDataURI, secret, errMsg)
-}
-
-templ totpEnrollPage(nav Nav, qrDataURI, secret, errMsg string) {
-	@Layout(T("set.enroll"), "account", nav, Flash{Msg: errMsg}) {
-		@PageHeader(T("set.enroll"), T("set.enrollhint"))
-		<div class="mx-auto max-w-md">
-			@card.Card() {
-				@card.Content(card.ContentProps{Class: "flex flex-col items-center gap-4 p-6"}) {
-					<img class="rounded-lg border bg-white p-2" width="200" height="200" src={ qrDataURI } alt={ T("set.qralt") }/>
-					<div class="text-center text-sm text-muted-foreground">
-						<p>{ T("set.manual") }</p>
-						<code class="font-mono text-xs">{ secret }</code>
-					</div>
-					<form method="post" action="/admin/account/totp/enable" class="flex w-full flex-col items-center gap-4">
-						@inputotp.InputOTP(inputotp.Props{ID: "totp-code", Name: "code"}) {
-							@inputotp.Group() {
-								@inputotp.Slot(inputotp.SlotProps{Index: 0})
-								@inputotp.Slot(inputotp.SlotProps{Index: 1})
-								@inputotp.Slot(inputotp.SlotProps{Index: 2})
-							}
-							@inputotp.Separator()
-							@inputotp.Group() {
-								@inputotp.Slot(inputotp.SlotProps{Index: 3})
-								@inputotp.Slot(inputotp.SlotProps{Index: 4})
-								@inputotp.Slot(inputotp.SlotProps{Index: 5})
-							}
-						}
-						@button.Button(button.Props{Type: button.TypeSubmit, FullWidth: true}) {
-							@Icon("check")
-							<span>{ T("set.confirmenable") }</span>
-						}
-					</form>
-				}
-			}
+// TOTPEnrollBody fills the enrolment dialog: scan the code, type six digits,
+// done. The whole flow used to be a page of its own, which made adding a
+// second factor feel like leaving the account behind. A wrong code re-renders
+// this body in place, with the same secret, and the dialog stays open.
+templ TOTPEnrollBody(qrDataURI, secret, errMsg string) {
+	<form
+		method="post"
+		action="/admin/account/totp/enable"
+		class="flex flex-col items-center gap-4"
+		hx-post="/admin/account/totp/enable"
+		hx-target="#totp-body"
+		hx-swap="innerHTML"
+	>
+		<img class="rounded-lg border bg-white p-2" width="180" height="180" src={ qrDataURI } alt={ T(ctx, "set.qralt") }/>
+		<div class="text-center">
+			<p class="text-xs text-muted-foreground">{ T(ctx, "set.manual") }</p>
+			<code class="font-mono text-xs">{ secret }</code>
 		</div>
-	}
+		@inputotp.InputOTP(inputotp.Props{ID: "totp-code", Name: "code"}) {
+			@inputotp.Group() {
+				@inputotp.Slot(inputotp.SlotProps{Index: 0})
+				@inputotp.Slot(inputotp.SlotProps{Index: 1})
+				@inputotp.Slot(inputotp.SlotProps{Index: 2})
+			}
+			@inputotp.Separator()
+			@inputotp.Group() {
+				@inputotp.Slot(inputotp.SlotProps{Index: 3})
+				@inputotp.Slot(inputotp.SlotProps{Index: 4})
+				@inputotp.Slot(inputotp.SlotProps{Index: 5})
+			}
+		}
+		if errMsg != "" {
+			<p class="text-sm text-warning">{ errMsg }</p>
+		}
+		<div class="w-full">
+			@DialogFooter("dlg-totp", "check", T(ctx, "set.2fa.enable"))
+		</div>
+	</form>
 }

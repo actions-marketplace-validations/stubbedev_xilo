@@ -8,6 +8,7 @@ import (
 	"github.com/templui/templui/components/checkbox"
 	"github.com/templui/templui/components/copybutton"
 	"github.com/templui/templui/components/datepicker"
+	"github.com/templui/templui/components/dropdown"
 	"github.com/templui/templui/components/dialog"
 	"github.com/templui/templui/components/input"
 	"github.com/templui/templui/components/inputotp"
@@ -36,15 +37,29 @@ type Nav struct {
 	LoggedIn bool
 	UserName string
 	IsAdmin  bool            // instance admin (shows the Settings link)
+	Orgs     bool            // the viewer is in an organization, or may create one
 	Contexts []store.Account // the viewer's personal account + orgs
+	Sessions []NavSession    // every account this browser is signed in as
 	Active   string          // active context slug; "" = all accounts
+	Theme    string          // the user's palette id ("" = default), see theme.go
+	// RailCollapsed is the sidebar's state, read back from the cookie templui's
+	// script writes. It has to be server-rendered: the rail is part of every
+	// page's HTML, so without it a collapsed rail springs open again on the
+	// next navigation.
+	RailCollapsed bool
 }
 
 // Layout is the signed-in app shell: top navigation bar, flash banner, and the
 // page body. `section` marks the active nav item ("caches"/"account"/"settings").
 templ Layout(title, section string, nav Nav, flash Flash) {
 	<!DOCTYPE html>
-	<html lang="en" class="h-full">
+	<html
+		lang={ LocaleFrom(ctx) }
+		class="h-full"
+		if nav.Theme != "" {
+			data-palette={ nav.Theme }
+		}
+	>
 		<head>
 			<meta charset="utf-8"/>
 			<meta name="viewport" content="width=device-width, initial-scale=1"/>
@@ -52,6 +67,11 @@ templ Layout(title, section string, nav Nav, flash Flash) {
 			<link rel="icon" type="image/svg+xml" href={ Asset("favicon.svg") }/>
 			<link rel="stylesheet" href={ Asset("xilo-tw.css") }/>
 			<script src={ Asset("htmx.min.js") }></script>
+			// htmx's own preload extension (htmx-ext-preload 2.1.1, vendored like
+			// htmx itself): a link hovered for 100ms is fetched in the background,
+			// so the click that follows is served from the browser cache. It is
+			// what makes the cache headers in server.go's middleware worth having.
+			<script src={ Asset("htmx-preload.js") }></script>
 			<script>
 				(function () {
 					var t = localStorage.getItem('theme');
@@ -67,8 +87,25 @@ templ Layout(title, section string, nav Nav, flash Flash) {
 					}
 				})();
 				function xiloTheme() {
-					var d = document.documentElement.classList.toggle('dark');
-					localStorage.setItem('theme', d ? 'dark' : 'light');
+					var flip = function () {
+						var d = document.documentElement.classList.toggle('dark');
+						localStorage.setItem('theme', d ? 'dark' : 'light');
+					};
+					// Dark and light are two paints of the same page, so the swap is
+					// a cross-fade, not a redraw. Same root transition a navigation
+					// uses; without the API, or with motion turned down, it just flips.
+					if (
+						!document.startViewTransition ||
+						window.matchMedia('(prefers-reduced-motion: reduce)').matches
+					) {
+						flip();
+						return;
+					}
+					var vt = document.startViewTransition(flip);
+					// Toggling again mid-fade skips the running transition, which
+					// rejects `ready`. Nothing is waiting on it; without this the
+					// console fills with unhandled rejections.
+					if (vt && vt.ready) vt.ready.catch(function () {});
 				}
 			</script>
 			@input.Script()
@@ -78,6 +115,7 @@ templ Layout(title, section string, nav Nav, flash Flash) {
 			@textarea.Script()
 			@popover.Script()
 			@datepicker.Script()
+			@dropdown.Script()
 			@dialog.Script()
 			@tabs.Script()
 			@tooltip.Script()
@@ -88,12 +126,40 @@ templ Layout(title, section string, nav Nav, flash Flash) {
 			@chart.Script()
 			@sidebar.Script()
 			@webauthnScript()
+			@toastLayer()
+			@searchClearLayer()
+			@comboboxKeysLayer()
+			@autosaveLayer()
+			@chartReinitLayer()
+			if DevMode {
+				@devReloadScript()
+			}
 		</head>
-		<body class="bg-background text-foreground antialiased">
+		// hx-boost turns every in-shell link and form into an AJAX swap of the
+		// body: the stylesheet is not re-parsed, the component scripts are not
+		// re-run, and the rail keeps its scroll and its open dropdown. The swap
+		// spec is inherited, so `transition:true` routes a navigation through
+		// the same View Transition CSS as a real one — set here rather than
+		// globally, because the search, sort and pager swaps carry an hx-swap of
+		// their own and must stay instant.
+		//
+		// hx-history="false" keeps htmx from writing each page's DOM into
+		// localStorage for the back button: a freshly created token is rendered
+		// once and would otherwise sit in there, readable by anything on the
+		// origin, long after the session ended. Back re-fetches instead.
+		<body
+			class="bg-background text-foreground antialiased"
+			hx-boost="true"
+			hx-swap="innerHTML transition:true"
+			hx-indicator="#nav-progress"
+			hx-history="false"
+			hx-ext="preload"
+		>
+			@navProgress()
 			if nav.LoggedIn {
 				@sidebar.Layout() {
 					@appSidebar(section, nav)
-					@sidebar.Inset() {
+					@sidebar.Inset(sidebar.InsetProps{Class: "min-w-0"}) {
 						<div class="flex min-h-svh flex-col">
 							<header class="sticky top-0 z-20 flex h-14 items-center gap-2 border-b bg-background/80 px-4 backdrop-blur">
 								@sidebar.Trigger(sidebar.TriggerProps{Target: "app-sidebar", Class: "-ml-1"})
@@ -101,7 +167,7 @@ templ Layout(title, section string, nav Nav, flash Flash) {
 									@themeToggle()
 								</div>
 							</header>
-							<main class="mx-auto w-full max-w-6xl flex-1 px-4 py-8 sm:px-6">
+							<main id="page" class="mx-auto w-full max-w-6xl flex-1 px-4 py-8 sm:px-6" preload="mouseover">
 								@FlashToast(flash)
 								{ children... }
 							</main>
@@ -110,7 +176,7 @@ templ Layout(title, section string, nav Nav, flash Flash) {
 					}
 				}
 			} else {
-				<main class="mx-auto w-full max-w-4xl px-4 py-10 sm:px-6">
+				<main id="page" class="mx-auto w-full max-w-4xl px-4 py-10 sm:px-6" preload="mouseover">
 					@FlashToast(flash)
 					{ children... }
 				</main>
@@ -121,37 +187,59 @@ templ Layout(title, section string, nav Nav, flash Flash) {
 
 // appSidebar is the collapsible left navigation rail.
 templ appSidebar(section string, nav Nav) {
-	@sidebar.Sidebar(sidebar.Props{ID: "app-sidebar", Collapsible: sidebar.CollapsibleIcon}) {
+	@sidebar.Sidebar(sidebar.Props{ID: "app-sidebar", Collapsible: sidebar.CollapsibleIcon, Collapsed: nav.RailCollapsed}) {
 		@sidebar.Header() {
 			<a href="/admin" class="flex items-center gap-2 px-2 py-1 font-semibold tracking-tight">
-				<span class="text-primary">
+				<span class="text-brand">
 					@Icon("box")
 				</span>
 				<span class="group-data-[tui-sidebar-state=collapsed]:hidden">Xilo</span>
 			</a>
 		}
-		@sidebar.Content() {
-			if len(nav.Contexts) > 1 {
+		// preload sits on the containers that hold links, not on <body>: the
+		// extension initialises the [preload] elements it finds under whatever
+		// node htmx has just processed, and a boosted swap replaces the body's
+		// children, never <body> itself — an attribute up there would be read
+		// once, on the first load, and never again.
+		@sidebar.Content(sidebar.ContentProps{Attributes: templ.Attributes{"preload": "mouseover"}}) {
+			// The nav says which job you are here to do. Running the instance and
+			// using a workspace are different ones, so they are different groups —
+			// and the workspace items only exist for someone who is in an
+			// organization, which on a single-tenant instance is the same person
+			// wearing both hats.
+			if nav.IsAdmin {
 				@sidebar.Group() {
-					@contextSwitcher(nav)
+					@sidebar.GroupLabel() {
+						{ T(ctx, "nav.instance") }
+					}
+					@sidebar.Menu() {
+						@navItem("/admin/console", T(ctx, "console.title"), "server-cog", section == "console")
+						@navItem("/admin/settings", T(ctx, "nav.settings"), "settings", section == "settings")
+						@navItem("/admin/status", T(ctx, "nav.status"), "activity", section == "status")
+						@navItem("/admin/audit", T(ctx, "nav.audit"), "scroll-text", section == "audit")
+					}
 				}
 			}
 			@sidebar.Group() {
 				@sidebar.Menu() {
-					@navItem("/admin", T("nav.caches"), "database", section == "caches")
-					@navItem("/admin/account", T("nav.account"), "user", section == "account")
-					if nav.IsAdmin {
-						@navItem("/admin/settings", T("nav.settings"), "settings", section == "settings")
+					if len(nav.Contexts) > 0 {
+						@navItem("/admin", T(ctx, "nav.caches"), "database", section == "caches")
 					}
-					@navItem("/admin/status", T("nav.status"), "activity", section == "status")
-					if nav.IsAdmin {
-						@navItem("/admin/audit", T("nav.audit"), "scroll-text", section == "audit")
+					if nav.Orgs {
+						@navItem("/admin/orgs", T(ctx, "org.title"), "building-2", section == "orgs")
 					}
+					if !nav.IsAdmin {
+						@navItem("/admin/status", T(ctx, "nav.status"), "activity", section == "status")
+					}
+					@navItem("/admin/account", T(ctx, "nav.account"), "user", section == "account")
 				}
 			}
 		}
 		@sidebar.Footer() {
-			@userMenu()
+			if len(nav.Contexts) > 1 {
+				@contextSwitcher(nav)
+			}
+			@userMenu(nav)
 		}
 	}
 }
@@ -166,10 +254,10 @@ templ navItem(href, text, icon string, active bool) {
 }
 
 templ themeToggle() {
-	@WithTooltip(T("nav.theme")) {
+	@WithTooltip(T(ctx, "nav.theme")) {
 		@button.Button(button.Props{
 			Variant: button.VariantGhost, Size: button.SizeIcon, Type: button.TypeButton,
-			Attributes: templ.Attributes{"onclick": "xiloTheme()", "aria-label": T("nav.theme")},
+			Attributes: templ.Attributes{"onclick": "xiloTheme()", "aria-label": T(ctx, "nav.theme")},
 		}) {
 			<span class="hidden dark:block">
 				@Icon("sun")
@@ -181,25 +269,28 @@ templ themeToggle() {
 	}
 }
 
-// contextSwitcher scopes the dashboard to one account (or all): a searchable
-// selectbox that posts on selection. The guard keeps the search field's own
-// change events (blur after typing) from re-submitting; only the hidden ctx
-// input submits. Hidden on the collapsed icon rail — no room for a select.
+// contextSwitcher picks the one workspace the admin is looking at. It sits in
+// the footer beside the identity it acts as, because the workspace you are in
+// and who you are in it as are the same kind of fact.
 templ contextSwitcher(nav Nav) {
 	<form
 		method="post"
 		action="/admin/context"
 		class="group-data-[tui-sidebar-state=collapsed]:hidden"
-		onchange="if (event.target.name === 'ctx') this.submit()"
+		onchange="if (event.target.name === 'ctx') this.requestSubmit()"
 	>
 		@selectbox.SelectBox() {
-			@selectbox.Trigger(selectbox.TriggerProps{Name: "ctx", Attributes: templ.Attributes{"aria-label": T("nav.context")}}) {
-				@selectbox.Value(selectbox.ValueProps{Placeholder: T("nav.allaccounts")})
+			@selectbox.Trigger(selectbox.TriggerProps{
+				Name:       "ctx",
+				Class:      "h-8",
+				Attributes: templ.Attributes{"aria-label": T(ctx, "nav.context") + ": " + nav.Active},
+			}) {
+				<span class="flex min-w-0 items-center gap-2">
+					@Icon("building-2")
+					@selectbox.Value(selectbox.ValueProps{Placeholder: T(ctx, "nav.context")})
+				</span>
 			}
-			@selectbox.Content() {
-				@selectbox.Item(selectbox.ItemProps{Value: "", Selected: nav.Active == ""}) {
-					{ T("nav.allaccounts") }
-				}
+			@selectbox.Content(selectbox.ContentProps{NoSearch: noSearch(len(nav.Contexts))}) {
 				for _, c := range nav.Contexts {
 					@selectbox.Item(selectbox.ItemProps{Value: c.Slug, Selected: nav.Active == c.Slug}) {
 						{ c.Slug }
@@ -210,51 +301,660 @@ templ contextSwitcher(nav Nav) {
 	</form>
 }
 
-// userMenu is the sidebar footer: just the log-out button (icon-only on the
-// collapsed rail, where the tooltip names it).
-templ userMenu() {
-	<form method="post" action="/admin/logout">
-		@WithTooltip(T("nav.logout")) {
-			@button.Button(button.Props{
-				Variant: button.VariantOutline, Type: button.TypeSubmit, FullWidth: true, Size: button.SizeSm,
-				Class:      "gap-2 text-destructive hover:text-destructive group-data-[tui-sidebar-state=collapsed]:px-0",
-				Attributes: templ.Attributes{"aria-label": T("nav.logout")},
-			}) {
-				@Icon("log-out")
-				<span class="group-data-[tui-sidebar-state=collapsed]:hidden">{ T("nav.logout") }</span>
-			}
+// footerTrigger is the sidebar footer's control shape: an icon saying which
+// kind of thing this switches, the current value, and the up/down chevrons
+// that mark a menu. Sized to match the workspace combobox above it.
+templ footerTrigger(icon, value, label string) {
+	@button.Button(button.Props{
+		Variant: button.VariantOutline, Type: button.TypeButton, FullWidth: true, Size: button.SizeSm,
+		// Collapsed, the value and the chevrons are gone and the icon is all
+		// that is left: centre it, or justify-between parks it against the
+		// left edge of a button the width of the rail.
+		Class:      "justify-between gap-2 group-data-[tui-sidebar-state=collapsed]:justify-center group-data-[tui-sidebar-state=collapsed]:px-0",
+		Attributes: templ.Attributes{"aria-label": label + ": " + value},
+	}) {
+		<span class="flex min-w-0 items-center gap-2">
+			@Icon(icon)
+			<span class="truncate group-data-[tui-sidebar-state=collapsed]:hidden">{ value }</span>
+		</span>
+		<span class="group-data-[tui-sidebar-state=collapsed]:hidden">
+			@IconClass("chevrons-up-down", 14, "")
+		</span>
+	}
+}
+
+// userMenu is the sidebar footer: who you are signed in as, and a menu of the
+// other accounts this browser is signed in as. A person can hold several at
+// once (see the wallet in wallet.go), so the way to a second account is Add
+// account here, not signing out of the first.
+templ userMenu(nav Nav) {
+	@dropdown.Dropdown() {
+		@dropdown.Trigger() {
+			@footerTrigger("circle-user", nav.UserName, T(ctx, "nav.account"))
 		}
-	</form>
+		@dropdown.Content(dropdown.ContentProps{Class: "w-56"}) {
+			@dropdown.Label() {
+				{ T(ctx, "nav.account") }
+			}
+			// One form, one button per account: the menu posts a user id, never
+			// a session id — those are the secret the wallet holds.
+			<form method="post" action="/admin/session/switch">
+				for _, acct := range nav.Sessions {
+					if !acct.Active {
+						@dropdown.Item(dropdown.ItemProps{Class: "p-0"}) {
+							<button type="submit" name="user" value={ itoa(acct.UserID) } class="flex w-full items-center gap-2 px-2 py-1.5 text-left">
+								@Icon("circle-user")
+								<span class="truncate">{ acct.Name }</span>
+							</button>
+						}
+					}
+				}
+			</form>
+			// Leaves the app shell for the sign-in page, which has a <head> and a
+			// body layout of its own — a boosted swap would splice it into this one.
+			@dropdown.Item(dropdown.ItemProps{Href: "/admin/signin", Class: "justify-start gap-2", Attributes: templ.Attributes{"hx-boost": "false"}}) {
+				@Icon("plus")
+				<span>{ T(ctx, "nav.addaccount") }</span>
+			}
+			@dropdown.Separator()
+			<form method="post" action="/admin/logout" hx-boost="false">
+				@dropdown.Item(dropdown.ItemProps{Class: "p-0"}) {
+					<button type="submit" class="flex w-full items-center gap-2 px-2 py-1.5 text-left text-destructive">
+						@Icon("log-out")
+						<span>{ T(ctx, "nav.logout") }</span>
+					</button>
+				}
+			</form>
+		}
+	}
 }
 
 templ footer() {
 	<footer class="border-t">
 		<div class="mx-auto w-full max-w-6xl px-4 py-5 text-center text-sm text-muted-foreground sm:px-6">
-			<span class="font-medium text-foreground">Xilo</span> { T("footer.tagline") }
+			<span class="font-medium text-foreground">Xilo</span>{ MetaSep }{ T(ctx, "footer.tagline") }
 		</div>
 	</footer>
 }
 
+// toastLayer is the one client-side toast surface: a <template> per registered
+// toastKind plus a single delegated listener. The templui toast script watches
+// the DOM for new toasts, so cloning a template into the body is all it takes.
+//
+// To raise a toast:
+//   - declaratively: data-toast="<kind>" on any clickable element;
+//   - from script:   xiloToast('<kind>') — pass a second argument to replace
+//     the kind's default message (server error text, say).
+//
+// To add a kind: one row in toastKinds (helpers.go) and its i18n key. Never a
+// second template + listener; that is what this layer exists to avoid.
+templ toastLayer() {
+	for _, k := range toastKinds {
+		<template data-toast-kind={ k.Key }>
+			@toast.Toast(toast.Props{
+				Description: T(ctx, k.MsgKey),
+				Variant:     k.Variant,
+				Position:    toast.PositionBottomRight,
+				Duration:    k.Duration,
+				Icon:        true,
+				Dismissible: true,
+			})
+		</template>
+	}
+	<script>
+		window.xiloToast = function (kind, msg) {
+			var t = document.querySelector('template[data-toast-kind="' + kind + '"]');
+			if (!t) return;
+			var frag = t.content.cloneNode(true);
+			if (msg) {
+				var p = frag.querySelector('[data-tui-toast] p');
+				if (p) p.textContent = msg;
+			}
+			document.body.appendChild(frag);
+		};
+		document.addEventListener('click', function (e) {
+			var el = e.target.closest('[data-toast]');
+			if (el) {
+				xiloToast(el.dataset.toast);
+				return;
+			}
+			// Copy buttons are templui's; they carry no data-toast of their own.
+			if (e.target.closest('[data-copy-button]')) xiloToast('copied');
+		});
+	</script>
+}
+
+// searchClearLayer gives every type=search field the same clear button.
+//
+// The native one (::-webkit-search-cancel-button) is a fixed grey glyph that
+// ignores the theme, so it is switched off and ours takes its place. One layer
+// rather than a prop on SearchInput, because the combobox search box belongs
+// to templui: it is rendered inside selectbox.Content and there is no call
+// site of ours to hang a button on. A script that decorates every search input
+// on the page covers both, and anything added later for free.
+//
+// The button is cloned from a <template> — the same trick toastLayer uses —
+// so it is still a templui button with a templui icon rather than markup
+// spelled out in JavaScript. Visibility is CSS only (input.css keys it on
+// :placeholder-shown), so an empty field shows nothing to click.
+templ searchClearLayer() {
+	<template data-search-clear-template>
+		@button.Button(button.Props{
+			Variant: button.VariantGhost, Type: button.TypeButton, Size: button.SizeIcon,
+			Class: "absolute right-1 top-1/2 size-6 -translate-y-1/2 text-muted-foreground hover:text-foreground",
+			Attributes: templ.Attributes{
+				"data-search-clear": "",
+				"tabindex":          "-1",
+				"aria-label":        T(ctx, "action.clear"),
+			},
+		}) {
+			@IconClass("x", 14, "")
+		}
+	</template>
+	<script>
+		(function () {
+			function decorate(root) {
+				var tpl = document.querySelector('template[data-search-clear-template]');
+				if (!tpl) return;
+				(root || document)
+					.querySelectorAll('input[type="search"]')
+					.forEach(function (el) {
+						if (el.dataset.searchClearOn) return;
+						el.dataset.searchClearOn = '1';
+						// Nothing typed in a search box is worth the browsers
+						// history dropdown covering the results underneath it.
+						el.setAttribute('autocomplete', 'off');
+						el.classList.add('pr-8');
+						var host = el.parentElement;
+						if (!host) return;
+						host.classList.add('relative');
+						host.appendChild(tpl.content.cloneNode(true));
+					});
+			}
+			function ready() {
+				decorate();
+				document.addEventListener('htmx:afterSwap', function (e) {
+					decorate(e.target);
+				});
+			}
+			if (document.readyState === 'loading') {
+				document.addEventListener('DOMContentLoaded', ready);
+			} else {
+				ready();
+			}
+			document.addEventListener('click', function (e) {
+				var b = e.target.closest('[data-search-clear]');
+				if (!b) return;
+				var inp = b.parentElement.querySelector('input[type="search"]');
+				if (!inp) return;
+				inp.value = '';
+				// input drives htmx's "input changed" trigger and templui's own
+				// option filter; search is what a native clear would have fired.
+				inp.dispatchEvent(new Event('input', { bubbles: true }));
+				inp.dispatchEvent(new Event('search', { bubbles: true }));
+				inp.focus();
+			});
+		})();
+	</script>
+}
+
+// autosaveLayer submits a `data-autosave` form as it is used: a picked option
+// a beat after the pick, a typed value a beat after the last keystroke. It is
+// for a settings list — controls with a current value and no Save button —
+// where the alternative is a Save the reader has to notice.
+//
+// It arms per form on the first pointer or key event inside it, and that is
+// not a nicety: templui patches the value setter of a selectbox's hidden input
+// to dispatch `input`, and initialising a select sets that value, so a swapped
+// -in form fires an input event with nobody touching it. Submitting on that
+// swaps the page, which initialises the select again — a refresh loop. Only a
+// form a human has actually reached into is allowed to save itself.
+templ autosaveLayer() {
+	<script>
+		(function () {
+			var armed = new WeakSet();
+			function formOf(t) {
+				return t && t.closest ? t.closest('form[data-autosave]') : null;
+			}
+			function arm(e) {
+				var f = formOf(e.target);
+				if (f) armed.add(f);
+			}
+			// The save answers with the whole page (the readouts around the
+			// form are derived from what it sets), and htmx swaps that in
+			// about a second later. Two things have to survive that swap or
+			// the form fights the reader:
+			//
+			// The caret. The control being edited is a different element
+			// afterwards, so where the reader was is remembered by field name
+			// and put back once the new body has settled.
+			//
+			// And anything edited while the save was in flight. "Type in one
+			// field, move to the next, keep typing" is the ordinary way to
+			// work through a form, and the first field's save lands in the
+			// middle of it — the incoming page carries the server's value for
+			// the field now being edited, from *before* those keystrokes.
+			//
+			// So every edit since the last submit is kept, and re-applied to
+			// the form the swap brings in, which then saves itself once more.
+			// The follow-up submits what it carried, leaving nothing to carry,
+			// so it stops there. The edits cannot be read off the outgoing
+			// form at swap time instead: the swap is wrapped in a View
+			// Transition, so the DOM is replaced the better part of a second
+			// after htmx says it is about to be — and everything typed inside
+			// that window would be read as already saved.
+			// Null-prototype: the keys are field names, and a field called
+			// __proto__ would otherwise write the prototype instead of an entry.
+			var edits = Object.create(null);
+			var caret = null;
+			var sentTo = null;
+			function field(f, name) {
+				var el = f.elements[name];
+				// elements[] answers form properties too ("length"), not just
+				// controls: anything without a tag name is not a field.
+				return el && el.tagName ? el : null;
+			}
+			function remember(f) {
+				// Submitting exactly what the form holds: nothing outstanding.
+				edits = Object.create(null);
+				caret = null;
+				sentTo = f.getAttribute('action');
+				var el = document.activeElement;
+				if (!el || !el.name || !f.contains(el)) return;
+				caret = { name: el.name, at: null };
+				// selectionStart throws on a number input in Chrome.
+				try {
+					caret.at = el.selectionStart;
+				} catch (e) {}
+			}
+			// The live form posting to `action` — the page a swap brought in
+			// carries a different element than the one edited. Matched by
+			// where it posts, so a page with two of these cannot cross-apply.
+			function liveForm(action) {
+				var found = null;
+				document.querySelectorAll('form[data-autosave]').forEach(function (cand) {
+					if (!found && cand.getAttribute('action') === action) found = cand;
+				});
+				return found;
+			}
+			function applyEdits(f, carried) {
+				var newer = false;
+				for (var name in carried) {
+					var el = field(f, name);
+					if (!el) continue;
+					var e = carried[name];
+					if (el.type === 'checkbox' || el.type === 'radio') {
+						if (el.checked === e.checked) continue;
+						el.checked = e.checked;
+					} else {
+						if (el.value === e.value) continue;
+						el.value = e.value;
+					}
+					newer = true;
+				}
+				return newer;
+			}
+			document.addEventListener('htmx:afterSettle', function () {
+				var c = caret;
+				var carried = edits;
+				var action = sentTo;
+				caret = null;
+				edits = Object.create(null);
+				sentTo = null;
+				var f = liveForm(action);
+				if (!f) return;
+				var newer = applyEdits(f, carried);
+				if (c) {
+					var focusEl = field(f, c.name);
+					if (focusEl) {
+						focusEl.focus();
+						try {
+							if (c.at !== null) focusEl.setSelectionRange(c.at, c.at);
+						} catch (e2) {}
+					}
+				}
+				if (newer) {
+					armed.add(f);
+					save(f, 150);
+				}
+			});
+			// requestSubmit, never submit(): a bare submit() fires no submit
+			// event, so htmx never sees it and the boosted shell is lost to a
+			// full page load.
+			function save(f, delay) {
+				clearTimeout(f.dataset.autosaveTimer);
+				f.dataset.autosaveTimer = setTimeout(function () {
+					var target = f;
+					// A swap can land between the last keystroke and this
+					// timer, leaving the edited form detached — submitting it
+					// does nothing (the browser says so in the console) and the
+					// edit would be lost. Carry it to the form now on the page.
+					if (!f.isConnected) {
+						target = liveForm(f.getAttribute('action'));
+						if (!target) return;
+						applyEdits(target, edits);
+						armed.add(target);
+					}
+					remember(target);
+					target.requestSubmit();
+				}, delay);
+			}
+			function onEdit(delay) {
+				return function (e) {
+					var f = formOf(e.target);
+					if (!f || !armed.has(f)) return;
+					var el = e.target;
+					if (el.name) {
+						edits[el.name] = { value: el.value, checked: el.checked };
+					}
+					save(f, delay);
+				};
+			}
+			document.addEventListener('pointerdown', arm, true);
+			document.addEventListener('keydown', arm, true);
+			// A pick is a finished decision; a keystroke may not be.
+			document.addEventListener('change', onEdit(150), true);
+			document.addEventListener('input', onEdit(800), true);
+		})();
+	</script>
+}
+
+// chartReinitLayer redraws the status charts when a boosted navigation brings
+// them back.
+//
+// templui keeps its Chart.js instances in a map keyed by canvas id and its
+// "new chart" observer only initialises a canvas whose id it has never seen.
+// The status page's canvas ids are fixed, so the first visit registers them
+// and every visit after it is skipped: the chart panels come back empty, and
+// only a full reload (a fresh JS context) fixes them. The instance it holds
+// belongs to a canvas that was swapped out from under it.
+//
+// It does re-initialise everything it knows about when the root element's
+// class or style changes — that is its dark-mode hook, and it cleans up the
+// dead instance on the way through. So when a swap leaves a canvas without an
+// instance, touch the root element with a class that styles nothing and let
+// templui recover its own map.
+templ chartReinitLayer() {
+	<script>
+		document.addEventListener('htmx:afterSettle', function () {
+			if (!window.Chart) return;
+			var orphan = false;
+			document.querySelectorAll('canvas[data-tui-chart-id]').forEach(function (cv) {
+				if (!Chart.getChart(cv.id)) orphan = true;
+			});
+			if (!orphan) return;
+			var root = document.documentElement;
+			root.classList.add('chart-reinit');
+			root.classList.remove('chart-reinit');
+		});
+	</script>
+}
+
+// comboboxKeysLayer makes a searchable selectbox behave like a combobox.
+//
+// templui drives its list by moving DOM focus onto the option elements, which
+// means the first ArrowDown takes focus out of the search box: from then on
+// typing goes nowhere, and Enter only works if an option happens to hold
+// focus. The fix is the standard combobox arrangement — focus never leaves the
+// input, and the option the arrows point at is tracked separately
+// (data-tui-active + aria-activedescendant), so filtering and navigating stay
+// available at the same time.
+//
+// The handler runs in the capture phase and stops propagation for exactly the
+// keys it takes over, because templui's own listener sits on document and
+// would otherwise still steal the focus. Escape is deliberately left alone —
+// templui already closes the popover and returns focus to the trigger.
+templ comboboxKeysLayer() {
+	<script>
+		(function () {
+			var ACTIVE = 'data-tui-active';
+			var seq = 0;
+
+			function options(content) {
+				return Array.prototype.filter.call(
+					content.querySelectorAll('.select-item'),
+					function (el) {
+						return (
+							el.style.display !== 'none' &&
+							el.getAttribute('data-tui-selectbox-disabled') !== 'true'
+						);
+					},
+				);
+			}
+			function clear(content) {
+				var cur = content.querySelector('[' + ACTIVE + ']');
+				if (cur) cur.removeAttribute(ACTIVE);
+			}
+			function setActive(input, content, item) {
+				clear(content);
+				if (!item) {
+					input.removeAttribute('aria-activedescendant');
+					return;
+				}
+				if (!item.id) item.id = 'cb-opt-' + ++seq;
+				item.setAttribute(ACTIVE, '');
+				input.setAttribute('aria-activedescendant', item.id);
+				item.scrollIntoView({ block: 'nearest' });
+			}
+			function ctx(el) {
+				if (!el || !el.matches || !el.matches('[data-tui-selectbox-search]')) {
+					return null;
+				}
+				var content = el.closest('[data-tui-selectbox-content]');
+				return content ? { input: el, content: content } : null;
+			}
+
+			// Escape asks "close the open list", which is a question about the
+			// page, not about where focus happens to be — templui's own handler
+			// only fires when the search input is the active element, and by the
+			// time Escape arrives focus may sit on the trigger (the click that
+			// opened it moves focus a frame later) or have been taken by a
+			// browser extension. Closing the one open selectbox is unambiguous:
+			// the popover is exclusive, so there is never more than one.
+			document.addEventListener(
+				'keydown',
+				function (e) {
+					if (e.key !== 'Escape') return;
+					var content = document.querySelector(
+						'[data-tui-selectbox-content][data-tui-popover-open="true"]',
+					);
+					if (!content) return;
+					var root = content.closest('[data-tui-popover-root]');
+					var trig = root && root.querySelector('button.select-trigger');
+					if (!trig) return;
+					// Stop here so an Escape meant for the list does not also
+					// close the dialog the list is sitting in.
+					e.preventDefault();
+					e.stopPropagation();
+					clear(content);
+					trig.click(); // templui's own toggle: closes and tidies up
+					// Its click handler focuses the search box on the next frame
+					// — which by then is hidden, so focus would land nowhere and
+					// the caret would be lost to <body>. Take it back after.
+					setTimeout(function () { trig.focus(); }, 60);
+				},
+				true,
+			);
+
+			document.addEventListener(
+				'keydown',
+				function (e) {
+					var c = ctx(e.target);
+					if (!c) return;
+
+					if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+						var items = options(c.content);
+						if (!items.length) return;
+						e.preventDefault();
+						e.stopPropagation();
+						var cur = c.content.querySelector('[' + ACTIVE + ']');
+						var i = items.indexOf(cur);
+						var next =
+							i < 0
+								? e.key === 'ArrowDown'
+									? 0
+									: items.length - 1
+								: (i + (e.key === 'ArrowDown' ? 1 : -1) + items.length) %
+									items.length;
+						setActive(c.input, c.content, items[next]);
+						return;
+					}
+
+					if (e.key === 'Enter') {
+						// Always swallow Enter: this input usually lives inside a
+						// form, and submitting it is never what picking an option
+						// from a list is supposed to do.
+						e.preventDefault();
+						e.stopPropagation();
+						var pick =
+							c.content.querySelector('[' + ACTIVE + ']') || options(c.content)[0];
+						// click() is the same path a mouse takes, so selection,
+						// change event and close all stay templui's business.
+						if (pick) pick.click();
+						return;
+					}
+
+					return;
+				},
+				true,
+			);
+
+			// Typing changes which options exist; a stale highlight would point
+			// at a row that is no longer in the filtered list.
+			document.addEventListener('input', function (e) {
+				var c = ctx(e.target);
+				if (c) setActive(c.input, c.content, null);
+			});
+
+			// One highlight at a time: moving the pointer over the list hands it
+			// to the row under the cursor.
+			document.addEventListener('pointerover', function (e) {
+				var item = e.target.closest && e.target.closest('.select-item');
+				if (!item) return;
+				var content = item.closest('[data-tui-selectbox-content]');
+				var input = content && content.querySelector('[data-tui-selectbox-search]');
+				if (input) setActive(input, content, item);
+			});
+		})();
+	</script>
+}
+
+// devReloadScript patches the page in place whenever the dev server comes
+// back after a rebuild (the SSE stream at /dev/events drops on restart and
+// reconnects). Dev only, never shipped to a page in production: DevMode is
+// false unless XILO_DEV is set.
+//
+// The shape follows Hotwire Spark (37signals' live reload for Rails): fetch
+// the current URL, hot-swap any stylesheet whose fingerprint changed by
+// loading the new one before removing the old (no unstyled flash), then morph
+// <body> with idiomorph so only changed nodes are touched.
+//
+// Why this survives a morph without re-initialising templui: every templui
+// script we load either delegates events on document (popover, copybutton,
+// checkbox, sidebar) or watches document.body with a MutationObserver and
+// initialises added nodes (dialog, selectbox, tabs, datepicker, toast, label,
+// progress, chart, inputotp, textarea). Nodes idiomorph keeps are already
+// initialised; nodes it adds get picked up by those observers. Client-side
+// state the server cannot know is left alone: <details open>, sidebar
+// collapse, and the data-tui-*-open/-state flags dialogs and popovers toggle.
+templ devReloadScript() {
+	<script src={ Asset("idiomorph.min.js") }></script>
+	<script>
+		(function () {
+			var keep =
+				/^open$|^data-tui-.*-(open|state|closing|initialized|placement)$/;
+			var connected = false;
+			function stem(href) {
+				return href.split('?')[0];
+			}
+			function swapStyles(next) {
+				var jobs = [];
+				next.querySelectorAll('link[rel=stylesheet]').forEach(function (fresh) {
+					var cur = Array.prototype.find.call(
+						document.querySelectorAll('link[rel=stylesheet]'),
+						function (l) {
+							return (
+								stem(l.getAttribute('href')) ===
+								stem(fresh.getAttribute('href'))
+							);
+						},
+					);
+					if (!cur) {
+						document.head.appendChild(fresh.cloneNode());
+						return;
+					}
+					if (cur.getAttribute('href') === fresh.getAttribute('href')) return;
+					jobs.push(
+						new Promise(function (done) {
+							var link = fresh.cloneNode();
+							link.onload = link.onerror = function () {
+								cur.remove();
+								done();
+							};
+							cur.after(link);
+						}),
+					);
+				});
+				return Promise.all(jobs);
+			}
+			function morphBody(next) {
+				document.title = next.title;
+				Idiomorph.morph(document.body, next.body, {
+					callbacks: {
+						beforeAttributeUpdated: function (name) {
+							return !keep.test(name);
+						},
+						beforeNodeRemoved: function (node) {
+							return !(node.matches && node.matches('[data-tui-toast]'));
+						},
+					},
+				});
+			}
+			var es = new EventSource('/dev/events');
+			es.onopen = function () {
+				if (!connected) {
+					connected = true;
+					return;
+				}
+				fetch(location.href, { headers: { 'X-Dev-Reload': '1' } })
+					.then(function (r) {
+						return r.text();
+					})
+					.then(function (html) {
+						var next = new DOMParser().parseFromString(html, 'text/html');
+						return swapStyles(next).then(function () {
+							morphBody(next);
+							console.debug('xilo dev: page patched');
+						});
+					})
+					.catch(function () {
+						location.reload();
+					});
+			};
+		})();
+	</script>
+}
+
 // CopyField shows a value in a monospace box with a copy button.
 templ CopyField(value string) {
-	<div class="mt-3 flex items-center gap-2 rounded-md border bg-muted/50 p-2">
-		<code id={ copyID(value) } class="min-w-0 flex-1 overflow-x-auto whitespace-nowrap px-1 font-mono text-xs">{ value }</code>
+	<div class="flex items-center gap-2 rounded-md border bg-muted/40 p-2">
+		<code id={ copyID(value) } class="min-w-0 flex-1 overflow-x-auto whitespace-nowrap px-1 font-mono text-xs scrollbar-none">{ value }</code>
 		@copybutton.CopyButton(copybutton.Props{TargetID: copyID(value), Class: "shrink-0"})
 	</div>
 }
 
 // NotFound is the styled 404 page for browser routes.
 templ NotFound(nav Nav) {
-	@Layout(T("nf.doc"), "", nav, Flash{}) {
+	@Layout(T(ctx, "nf.doc"), "", nav, Flash{}) {
 		<div class="flex flex-col items-center gap-4 py-24 text-center">
 			<span class="text-muted-foreground">
 				@IconClass("compass", 48, "")
 			</span>
-			<h1 class="text-2xl font-semibold">{ T("nf.title") }</h1>
-			<p class="text-muted-foreground">{ T("nf.sub") }</p>
+			<h1 class="text-2xl font-semibold">{ T(ctx, "nf.title") }</h1>
+			<p class="text-muted-foreground">{ T(ctx, "nf.sub") }</p>
 			@button.Button(button.Props{Href: "/admin", Variant: button.VariantOutline}) {
 				@Icon("arrow-left")
-				<span>{ T("nf.back") }</span>
+				<span>{ T(ctx, "nf.back") }</span>
 			}
 		</div>
 	}
@@ -264,4 +964,23 @@ templ NotFound(nav Nav) {
 templ Icon(name string) {
 	@rawIcon(name)
 	{ children... }
+}
+
+// NavSession is one account this browser is signed in as, for the account
+// menu in the sidebar footer.
+type NavSession struct {
+	UserID int64
+	Name   string
+	Active bool
+}
+
+// navProgress is the whole of a boosted navigation's feedback: a hairline at
+// the top edge while the next page is in flight. It is the shared hx-indicator
+// (set on <body>), so any request that does not name one of its own lights it.
+// input.css holds it back for a beat — a page that answers in 80ms should
+// flash nothing at all.
+templ navProgress() {
+	<div id="nav-progress" class="pointer-events-none fixed inset-x-0 top-0 z-50 h-0.5 overflow-hidden" aria-hidden="true">
+		<div class="h-full w-2/5 bg-foreground/40"></div>
+	</div>
 }

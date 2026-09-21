@@ -223,7 +223,7 @@ var (
 
 // statusData builds the page view model (initial server render; the poller
 // keeps it fresh through the JSON endpoint afterwards).
-func (s *Server) statusData(q statusRangeQ) views.StatusData {
+func (s *Server) statusData(ctx context.Context, q statusRangeQ) views.StatusData {
 	_, healthErr := s.db.ListCaches()
 	m := &s.metrics
 	set := s.statusSeries(q)
@@ -253,25 +253,32 @@ func (s *Server) statusData(q statusRangeQ) views.StatusData {
 		To:      set.toStr,
 	}
 	d.Charts = []views.ChartData{
-		statusChartData("req", views.T("status.req"), set.req, set.times, fmtReq),
-		statusChartData("lat", views.T("status.lat"), set.lat, set.times, fmtLat),
-		statusChartData("thru", views.T("status.thru"), set.bps, set.times, fmtBps),
-		statusChartData("stored", views.T("status.storedchart"), set.stored, set.times, fmtB),
+		statusChartData("req", views.T(ctx, "status.req"), set.req, set.times, fmtReq),
+		statusChartData("lat", views.T(ctx, "status.lat"), set.lat, set.times, fmtLat),
+		statusChartData("thru", views.T(ctx, "status.thru"), set.bps, set.times, fmtBps),
+		statusChartData("stored", views.T(ctx, "status.storedchart"), set.stored, set.times, fmtB),
 	}
 	return d
 }
 
 // statusChartMeta pins each chart's drawn-point scale and line color. Scaling
 // byte series to MiB keeps the Y axis readable; colors must be literal (the
-// canvas can't resolve var()/color-mix), picked to hold up in both themes.
+// canvas can't resolve var()/color-mix).
+//
+// Four fixed categorical slots, in this order, one set for both themes: these
+// steps are chosen against the dark surface and still clear every hard gate on
+// the light one (worst adjacent CVD dE 8.4, normal vision 19.8). The pair they
+// replace sat 14 degrees of hue apart, which drew throughput and stored as the
+// same amber. Yellow lands a hair under 3:1 on white, which the relief rule
+// allows because every chart carries its title and current value as text.
 var statusChartMeta = map[string]struct {
 	Scale float64
 	Color string
 }{
-	"req":    {1, "oklch(0.646 0.222 41.116)"},
-	"lat":    {1, "oklch(0.6 0.118 184.704)"},
-	"thru":   {1 << 20, "oklch(0.828 0.189 84.429)"},
-	"stored": {1 << 20, "oklch(0.769 0.188 70.08)"},
+	"req":    {1, "#3987e5"},       // categorical slot 1, blue
+	"lat":    {1, "#d95926"},       // slot 2, orange
+	"thru":   {1 << 20, "#199e70"}, // slot 3, aqua
+	"stored": {1 << 20, "#c98500"}, // slot 4, yellow
 }
 
 // statusChartJSON is one chart's slice of the polled JSON payload.
@@ -519,7 +526,7 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	if !s.requireAdmin(w, r) {
 		return
 	}
-	d := s.statusData(statusRange(r))
+	d := s.statusData(r.Context(), statusRange(r))
 	d.Rate = statusRate(r)
 	d.Nav = s.nav(r, s.currentUser(r))
 	views.StatusPage(d).Render(r.Context(), w)
@@ -535,7 +542,7 @@ func (s *Server) handleStatusData(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
 	}
-	if u.Role != "owner" {
+	if !u.Superadmin() {
 		http.Error(w, "forbidden", http.StatusForbidden)
 		return
 	}

@@ -10,6 +10,8 @@ import (
 	"fmt"
 	"runtime"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	_ "modernc.org/sqlite"
@@ -24,6 +26,14 @@ type DB struct {
 	// key encrypts sensitive columns and keys token hashes; nil = plaintext.
 	// Derived from the configured database.salt via SetSalt.
 	key []byte
+	// statsMu guards refreshing, the set of caches whose stored summary is
+	// being recomputed right now (see StatsFor).
+	statsMu    sync.Mutex
+	refreshing map[int64]bool
+	// global is the memoised instance-wide summary behind GlobalStatsFor.
+	global           Global
+	globalAt         time.Time
+	globalRefreshing atomic.Bool
 }
 
 type wtask struct {
@@ -300,6 +310,23 @@ func migrate(w *sql.DB, pg bool) error {
 			bytes      INTEGER NOT NULL DEFAULT 0,
 			PRIMARY KEY (account_id, month)
 		)`,
+		// A cache's dashboard summary, stored rather than recomputed. Deriving
+		// it means reading every path's chunk list and pricing each hash, which
+		// grows with the cache and cannot be indexed away; the UI needs it on
+		// every page load. Written by StatsFor's background refresh, never by
+		// the push transaction, and dropped with its cache by the FK cascade.
+		// cache_id is a table-level PRIMARY KEY on purpose: the Postgres
+		// translation turns a column-level "INTEGER PRIMARY KEY" into an
+		// identity column, which a foreign key must not be.
+		`CREATE TABLE IF NOT EXISTS cache_stats (
+			cache_id       INTEGER NOT NULL REFERENCES caches(id) ON DELETE CASCADE,
+			paths          INTEGER NOT NULL DEFAULT 0,
+			logical_bytes  INTEGER NOT NULL DEFAULT 0,
+			chunks         INTEGER NOT NULL DEFAULT 0,
+			physical_bytes INTEGER NOT NULL DEFAULT 0,
+			computed       INTEGER NOT NULL DEFAULT 0,
+			PRIMARY KEY (cache_id)
+		)`,
 		`CREATE TABLE IF NOT EXISTS settings (
 			key   TEXT PRIMARY KEY,
 			value TEXT NOT NULL DEFAULT ''
@@ -351,6 +378,8 @@ func migrate(w *sql.DB, pg bool) error {
 		{"sessions", "user_id", "INTEGER NOT NULL DEFAULT 0"},
 		{"users", "email", "TEXT"},
 		{"users", "status", "TEXT NOT NULL DEFAULT 'active'"},
+		{"users", "theme", "TEXT NOT NULL DEFAULT ''"},
+		{"users", "locale", "TEXT NOT NULL DEFAULT ''"},
 		{"accounts", "kind", "TEXT NOT NULL DEFAULT 'org'"},
 		{"accounts", "plan_id", "INTEGER NOT NULL DEFAULT 0"},
 		{"accounts", "status", "TEXT NOT NULL DEFAULT 'active'"},
@@ -384,14 +413,50 @@ func migrate(w *sql.DB, pg bool) error {
 	}
 
 	// Indexes last — they may reference columns the ALTERs just added.
+	//
+	// The paths indexes are all (cache_id, <sort key>): every list in the UI is
+	// one cache's paths in some order, and UNIQUE(cache_id, store_hash) can
+	// only serve the filter, leaving the sort to run over the whole cache. The
+	// name index mirrors SearchPaths' expression exactly — store paths begin
+	// with a fixed-width "/nix/store/<32-char hash>-", so char 45 is where the
+	// package name starts and sorting on the raw column would sort by hash.
+	// lower() and substr() mean the same thing in SQLite and PostgreSQL, so
+	// one statement serves both.
 	for _, s := range []string{
 		`CREATE INDEX IF NOT EXISTS idx_paths_accessed ON paths(accessed)`,
+		`CREATE INDEX IF NOT EXISTS idx_paths_cache_accessed ON paths(cache_id, accessed)`,
+		`CREATE INDEX IF NOT EXISTS idx_paths_cache_size ON paths(cache_id, nar_size, accessed)`,
+		`CREATE INDEX IF NOT EXISTS idx_paths_cache_name ON paths(cache_id, lower(substr(store_path, 45)))`,
 		`CREATE INDEX IF NOT EXISTS idx_chunks_created ON chunks(created)`,
+		`CREATE INDEX IF NOT EXISTS idx_audit_ts ON audit_log(ts)`,
+		`CREATE INDEX IF NOT EXISTS idx_members_user ON account_members(user_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_tokens_account ON tokens(account_id)`,
 		`CREATE UNIQUE INDEX IF NOT EXISTS idx_users_email ON users(email) WHERE email IS NOT NULL`,
 	} {
 		if _, err := w.Exec(s); err != nil {
 			return fmt.Errorf("migrate index: %w", err)
 		}
+	}
+	// The instance role was called "owner", which is also what an organization
+	// calls its own owner. One word for two authorities is how a check ends up
+	// asking the wrong question. Renaming the value only: memberships keep
+	// their own "owner", and whatever the instance admin already owns stays
+	// theirs — this migration takes nothing away.
+	if _, err := w.Exec(`UPDATE users SET role='superadmin' WHERE role='owner'`); err != nil {
+		return fmt.Errorf("migrate superadmin role: %w", err)
+	}
+	// The read-only state was called past_due, which described a subscription
+	// this project does not have. Same state, honest name.
+	if _, err := w.Exec(`UPDATE accounts SET status='readonly' WHERE status='past_due'`); err != nil {
+		return fmt.Errorf("migrate account status: %w", err)
+	}
+	// Every account is an organization. A personal account was already one in
+	// everything but name — a namespace with a single owner — and the separate
+	// kind bought only a set of rules saying what it could not do: gain a
+	// member, be billed as a team, be listed with the others. Slugs do not
+	// change, so no cache URL moves.
+	if _, err := w.Exec(`UPDATE accounts SET kind='org' WHERE kind<>'org'`); err != nil {
+		return fmt.Errorf("migrate accounts to orgs: %w", err)
 	}
 	return nil
 }
@@ -574,13 +639,21 @@ func renameColumnIfPresent(w *sql.DB, pg bool, table, from, to string) error {
 // UNIQUE from name to (account_id, name)), and prefixes existing token cache
 // scopes with "default/" to match the pattern grammar.
 func migrateNamespaces(w *sql.DB, pg bool) error {
-	if _, err := w.Exec(`INSERT INTO accounts (slug, kind, created) VALUES ('default', 'org', ?) ON CONFLICT (slug) DO NOTHING`,
-		time.Now().Unix()); err != nil {
-		return err
-	}
+	// The 'default' account is created only when legacy rows actually need a
+	// home. It used to be inserted unconditionally, so every fresh install
+	// started life with an *organization* named "default" that nobody had
+	// created — half of why the account layer read as magic.
 	var defID int64
-	if err := w.QueryRow(`SELECT id FROM accounts WHERE slug='default'`).Scan(&defID); err != nil {
-		return err
+	ensureDefault := func() (int64, error) {
+		if defID != 0 {
+			return defID, nil
+		}
+		if _, err := w.Exec(`INSERT INTO accounts (slug, kind, created) VALUES ('default', 'org', ?) ON CONFLICT (slug) DO NOTHING`,
+			time.Now().Unix()); err != nil {
+			return 0, err
+		}
+		err := w.QueryRow(`SELECT id FROM accounts WHERE slug='default'`).Scan(&defID)
+		return defID, err
 	}
 
 	// A pre-account SQLite table still carries UNIQUE(name); rebuild it.
@@ -639,8 +712,18 @@ func migrateNamespaces(w *sql.DB, pg bool) error {
 	}
 
 	// Rehome caches that predate accounts.
-	if _, err := w.Exec(`UPDATE caches SET account_id=? WHERE account_id=0`, defID); err != nil {
+	var orphans int
+	if err := w.QueryRow(`SELECT COUNT(*) FROM caches WHERE account_id=0`).Scan(&orphans); err != nil {
 		return err
+	}
+	if orphans > 0 {
+		id, err := ensureDefault()
+		if err != nil {
+			return err
+		}
+		if _, err := w.Exec(`UPDATE caches SET account_id=? WHERE account_id=0`, id); err != nil {
+			return err
+		}
 	}
 
 	// Global-token scope grammar is *, ns/* or ns/cache — a bare "mycache"
@@ -678,6 +761,9 @@ func migrateNamespaces(w *sql.DB, pg bool) error {
 		}
 		if !changed {
 			continue
+		}
+		if _, err := ensureDefault(); err != nil {
+			return err
 		}
 		if _, err := w.Exec(`UPDATE tokens SET caches=? WHERE id=?`, strings.Join(parts, ","), t.id); err != nil {
 			return err
@@ -760,8 +846,9 @@ func migrateChunkStorage(w *sql.DB, pg bool) error {
 // untangles that manually. Idempotent.
 func migratePersonalAccounts(w *sql.DB) error {
 	rows, err := w.Query(`SELECT u.id, u.username, u.created FROM users u
-		WHERE NOT EXISTS (SELECT 1 FROM accounts a JOIN account_members m ON m.account_id=a.id
-			WHERE a.slug = u.username AND a.kind='user' AND m.user_id = u.id)`)
+		WHERE u.role <> 'superadmin' AND NOT EXISTS (
+			SELECT 1 FROM accounts a JOIN account_members m ON m.account_id=a.id
+			WHERE a.slug = u.username AND m.user_id = u.id)`)
 	if err != nil {
 		return err
 	}
@@ -794,7 +881,7 @@ func migratePersonalAccounts(w *sql.DB) error {
 		}
 		var accID int64
 		if err := w.QueryRow(`INSERT INTO accounts (slug, kind, created) VALUES (?,?,?) RETURNING id`,
-			r.name, "user", r.created).Scan(&accID); err != nil {
+			r.name, "org", r.created).Scan(&accID); err != nil {
 			return err
 		}
 		if _, err := w.Exec(`INSERT INTO account_members (account_id, user_id, role) VALUES (?,?,'owner')

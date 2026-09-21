@@ -12,28 +12,48 @@ import (
 // "user" can
 // sign in and manage their own account (namespace membership scopes what they
 // see — added with namespaces).
+// RoleSuperadmin administers the instance itself — policy, plans, storage,
+// every organization and every user. It is not a tenant: it owns no account
+// and holds no caches, because running the service and buying it are different
+// jobs and an audit line is only worth reading while they stay apart. Seeded
+// from the configured password when the container first starts.
+const RoleSuperadmin = "superadmin"
+
+// RoleUser is everyone else: a login, whose reach is the organizations it is a
+// member of. Note that account_members.role has its own vocabulary (owner /
+// admin / user) for authority *inside* an organization — a user with no
+// instance role at all is the owner of their own workspace.
+const RoleUser = "user"
+
 type User struct {
 	ID          int64
 	Name        string
 	Email       string // optional; unique when set; usable for sign-in
 	PassHash    string
-	Role        string // "owner" | "user"
+	Role        string // RoleSuperadmin | RoleUser
 	Status      string // "active" | "pending" (awaiting approval)
 	TOTPEnabled bool
+	Theme       string // dashboard palette id ("" = default); light/dark is a browser choice
+	Locale      string // UI language id ("" = fall back to Accept-Language)
 	Created     int64
 }
+
+// Superadmin reports whether this login administers the instance. Always ask
+// this rather than comparing Role: "owner" also names an organization role,
+// and the two meanings sat on the same string for a long time.
+func (u *User) Superadmin() bool { return u != nil && u.Role == RoleSuperadmin }
 
 // ErrNameTaken means the username/account slug is already in use. The slug
 // namespace is public (caches mount at /c/{slug}), so surfacing this to the
 // client is fine — unlike an email collision, which must stay generic.
 var ErrNameTaken = errors.New("name already taken")
 
-const userCols = `id,username,COALESCE(email,''),password_hash,role,status,totp_enabled,created`
+const userCols = `id,username,COALESCE(email,''),password_hash,role,status,totp_enabled,theme,locale,created`
 
 func scanUser(row interface{ Scan(...any) error }) (*User, error) {
 	var u User
 	var totp int
-	if err := row.Scan(&u.ID, &u.Name, &u.Email, &u.PassHash, &u.Role, &u.Status, &totp, &u.Created); err != nil {
+	if err := row.Scan(&u.ID, &u.Name, &u.Email, &u.PassHash, &u.Role, &u.Status, &totp, &u.Theme, &u.Locale, &u.Created); err != nil {
 		return nil, err
 	}
 	u.TOTPEnabled = totp != 0
@@ -73,9 +93,15 @@ func (db *DB) createUser(name, email, passHash, role, status string) (*User, err
 			u.Name, email, u.PassHash, u.Role, u.Status, u.Created).Scan(&u.ID); err != nil {
 			return err
 		}
+		// A superadmin administers organizations; it is not in one. Everyone
+		// else gets a workspace of their own, named after them, which is what
+		// their caches hang off.
+		if u.Role == RoleSuperadmin {
+			return nil
+		}
 		var accID int64
 		if err := tx.QueryRow(`INSERT INTO accounts (slug, kind, created) VALUES (?,?,?) RETURNING id`,
-			u.Name, "user", u.Created).Scan(&accID); err != nil {
+			u.Name, "org", u.Created).Scan(&accID); err != nil {
 			return err
 		}
 		_, err := tx.Exec(`INSERT INTO account_members (account_id, user_id, role) VALUES (?,?,'owner')`, accID, u.ID)
@@ -170,6 +196,22 @@ func (db *DB) SetUserEmail(id int64, email string) error {
 	})
 }
 
+// SetUserTheme stores the user's dashboard palette id ("" = default).
+func (db *DB) SetUserTheme(id int64, theme string) error {
+	return db.write(func(tx *sql.Tx) error {
+		_, err := tx.Exec(`UPDATE users SET theme=? WHERE id=?`, theme, id)
+		return err
+	})
+}
+
+// SetUserLocale stores the user's UI language id ("" = follow the browser).
+func (db *DB) SetUserLocale(id int64, locale string) error {
+	return db.write(func(tx *sql.Tx) error {
+		_, err := tx.Exec(`UPDATE users SET locale=? WHERE id=?`, locale, id)
+		return err
+	})
+}
+
 // DeleteUser soft-deletes a user: their access is revoked for real (passkeys,
 // sessions, org memberships and personal-account tokens all go), but the users
 // row and personal account are kept, flagged status='deleted', so audit-log
@@ -195,10 +237,10 @@ func (db *DB) DeleteUser(id int64) error {
 		// Credentials die with the user: every token of their personal account
 		// is revoked (org tokens belong to the org, not to its members).
 		if _, err := tx.Exec(`UPDATE tokens SET revoked=1 WHERE account_id IN
-			(SELECT id FROM accounts WHERE slug=? AND kind='user')`, name); err != nil {
+			(SELECT id FROM accounts WHERE slug=?)`, name); err != nil {
 			return err
 		}
-		if _, err := tx.Exec(`UPDATE accounts SET status='deleted' WHERE slug=? AND kind='user'`, name); err != nil {
+		if _, err := tx.Exec(`UPDATE accounts SET status='deleted' WHERE slug=?`, name); err != nil {
 			return err
 		}
 		_, err := tx.Exec(`UPDATE users SET status='deleted', email=NULL WHERE id=?`, id)

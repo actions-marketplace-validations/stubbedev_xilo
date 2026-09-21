@@ -1,7 +1,9 @@
 package views
 
 import (
+	"context"
 	"fmt"
+	"maps"
 	"net/url"
 	"strconv"
 	"strings"
@@ -27,6 +29,26 @@ func dedupRatio(logical, stored int64) string {
 	return fmt.Sprintf("%.2f", float64(logical)/float64(stored))
 }
 
+// firstRun and noTokensYet mark the states where a list has nothing in it and
+// nothing is being filtered. The list's own controls — search over an empty
+// list, a create button duplicating the one in the empty state — are hidden
+// there; a filtered list that came back empty keeps them, because the search
+// box is how you get out of that.
+func firstRun(d DashboardData) bool {
+	return len(d.Caches) == 0 && d.CacheQuery == ""
+}
+
+func noTokensYet(d DashboardData) bool {
+	return len(d.Tokens) == 0 && d.TokenQuery == ""
+}
+
+// savedBytes is what deduplication kept off the disk. Never negative: a fresh
+// instance can report more stored than logical for a moment while a push is
+// still being accounted for, and "-2 KiB saved" reads as a bug.
+func savedBytes(logical, physical int64) int64 {
+	return max(logical-physical, 0)
+}
+
 // capSuffix appends " / <cap>" to the disk-used tile when a server cap is set.
 func capSuffix(cap int64, bytes func(int64) string) string {
 	if cap <= 0 {
@@ -36,9 +58,9 @@ func capSuffix(cap int64, bytes func(int64) string) string {
 }
 
 // capLabel is like capSuffix for the per-cache stat tile.
-func capLabel(cap int64, bytes func(int64) string) string {
+func capLabel(ctx context.Context, cap int64, bytes func(int64) string) string {
 	if cap <= 0 {
-		return " (" + T("cache.nocap") + ")"
+		return " (" + T(ctx, "cache.nocap") + ")"
 	}
 	return " / " + bytes(cap)
 }
@@ -48,10 +70,7 @@ func fillPct(used, capacity int64) int {
 	if capacity <= 0 {
 		return 0
 	}
-	p := used * 100 / capacity
-	if p > 100 {
-		p = 100
-	}
+	p := min(used*100/capacity, 100)
 	return int(p)
 }
 
@@ -135,12 +154,28 @@ func (s SortCtx) URL(key string) string {
 		dir = "desc"
 	}
 	v := url.Values{}
-	for k, vals := range s.Query {
-		v[k] = vals
-	}
+	maps.Copy(v, s.Query)
 	v.Set(s.SortParam, key)
 	v.Set(s.DirParam, dir)
 	v.Del(s.PageParam)
+	return s.Path + "?" + v.Encode()
+}
+
+// With rebuilds the listing URL with one query param set (removed when val is
+// empty) and paging reset: filter chips that compose with the active search
+// and sort.
+func (s SortCtx) With(key, val string) string {
+	v := url.Values{}
+	maps.Copy(v, s.Query)
+	if val == "" {
+		v.Del(key)
+	} else {
+		v.Set(key, val)
+	}
+	v.Del(s.PageParam)
+	if len(v) == 0 {
+		return s.Path
+	}
 	return s.Path + "?" + v.Encode()
 }
 
@@ -155,10 +190,7 @@ type Pager struct {
 // PageOf slices items for a 1-based page of size n, clamping page into range.
 // Returns the slice, the clamped page, and the page count (min 1).
 func PageOf[T any](items []T, page, n int) ([]T, int, int) {
-	pages := (len(items) + n - 1) / n
-	if pages < 1 {
-		pages = 1
-	}
+	pages := max((len(items)+n-1)/n, 1)
 	if page < 1 {
 		page = 1
 	}
@@ -166,10 +198,7 @@ func PageOf[T any](items []T, page, n int) ([]T, int, int) {
 		page = pages
 	}
 	lo := (page - 1) * n
-	hi := lo + n
-	if hi > len(items) {
-		hi = len(items)
-	}
+	hi := min(lo+n, len(items))
 	return items[lo:hi], page, pages
 }
 
@@ -200,19 +229,38 @@ type OrgInfo struct {
 	Plan    *store.Plan // nil = no plan (unlimited)
 	Used    int64       // logical bytes stored
 	Egress  int64       // NAR bytes served this month
+	Status  string      // lifecycle state; "" reads as active
 }
 
-// UsageLine renders "12 GiB stored (of 50 GiB) · 3 GiB egress this month".
-func (o OrgInfo) UsageLine() string {
-	out := humanBytesV(o.Used) + " " + T("acct.stored")
+// StatusOr is an account's lifecycle state with the default filled in: an
+// account written before the states existed has none, and it is active.
+func (o OrgInfo) StatusOr() string {
+	if o.Status == "" {
+		return "active"
+	}
+	return o.Status
+}
+
+// MetaSep separates the clauses of a meta line. An em space, not a middle
+// dot: the dot was punctuation pretending to be structure, and three of them
+// in a row ("0 B stored · 1 member · plan free") read as one long sentence
+// rather than three facts. Space is not a character the browser can collapse
+// here — U+2003 is not ASCII whitespace — so it survives in prose and in mono.
+const MetaSep = " "
+
+// UsageLine renders "12 GiB stored (of 50 GiB)   3 GiB egress this month".
+func (o OrgInfo) UsageLine(ctx context.Context) string {
+	// One format string per clause: a translator moves the words inside a
+	// clause, we only decide which clauses appear.
+	out := Tf(ctx, "acct.usestored", humanBytesV(o.Used))
 	if o.Plan != nil && o.Plan.MaxStorage > 0 {
-		out += " (" + T("acct.of") + " " + humanBytesV(o.Plan.MaxStorage) + ")"
+		out = Tf(ctx, "acct.useof", humanBytesV(o.Used), humanBytesV(o.Plan.MaxStorage))
 	}
 	if o.Egress > 0 {
-		out += " · " + humanBytesV(o.Egress) + " " + T("acct.egress")
+		out += MetaSep + Tf(ctx, "acct.useegress", humanBytesV(o.Egress))
 	}
 	if o.Plan != nil {
-		out += " · " + T("acct.plan") + " " + o.Plan.Name
+		out += MetaSep + Tf(ctx, "acct.useplan", o.Plan.Name)
 	}
 	return out
 }
@@ -230,10 +278,7 @@ func (u CacheUsage) Pct() int {
 	if u.Cache.MaxBytes <= 0 {
 		return 0
 	}
-	p := u.Bytes * 100 / u.Cache.MaxBytes
-	if p > 100 {
-		p = 100
-	}
+	p := min(u.Bytes*100/u.Cache.MaxBytes, 100)
 	return int(p)
 }
 

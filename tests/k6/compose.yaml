@@ -7,7 +7,8 @@
 #
 # `run --rm k6 …` starts the server via depends_on; k6's setup() waits on
 # /healthz and creates the cache through the admin API (the distroless image
-# has no shell for a compose healthcheck or seed script).
+# has no shell for a compose healthcheck or seed script -- the race profile's
+# glibc one does, and uses it).
 # Tear down with: docker compose -f tests/k6/compose.yaml down -v
 name: xilo-k6
 
@@ -44,7 +45,12 @@ services:
   # caches them for reruns.
   xilo-race:
     profiles: [race]
-    image: golang:1.26
+    # Must satisfy go.mod's `go` directive (1.27.0). The official images pin
+    # GOTOOLCHAIN=local, so a stale tag here fails outright instead of
+    # fetching what it needs: this profile sat broken from the 1.27 bump until
+    # the nightly started running it. GOTOOLCHAIN=auto below is the belt to
+    # that braces, so the next bump downloads its toolchain rather than dying.
+    image: golang:1.27
     volumes:
       - ../..:/src:ro
       - gomod:/go
@@ -52,13 +58,36 @@ services:
     environment:
       XILO_ADMIN_PASSWORD: k6-admin
       GOFLAGS: -buildvcs=false
+      GOTOOLCHAIN: auto
+    # Both generated artifacts are built here, because both are git-ignored and
+    # the nightly starts from a clean checkout: the admin stylesheet is
+    # embedded via go:embed, so a tree without it boots straight into
+    # `panic: open static/xilo-tw.css: file does not exist`. Tailwind is the
+    # pinned standalone CLI for the same reason as the release Dockerfile
+    # (v4.3+ latest went dynamically linked); the glibc build is the right one
+    # for this image.
     command:
       - sh
       - -c
       - |
         cp -r /src /build && cd /build &&
+        wget -qO /usr/local/bin/tailwindcss https://github.com/tailwindlabs/tailwindcss/releases/download/v4.3.2/tailwindcss-linux-x64 &&
+        chmod +x /usr/local/bin/tailwindcss &&
+        sh scripts/build-css.sh &&
         go run github.com/a-h/templ/cmd/templ@$(go list -m -f '{{.Version}}' github.com/a-h/templ) generate &&
         exec go run -race ./cmd/xilo serve --config /xilo.yaml
+    # Unlike the distroless `xilo` image this one has a shell, so the boot is
+    # a compose condition rather than a blind wait in k6: a server that dies
+    # on startup takes the run down with it in seconds. Without this, the
+    # panic above cost a whole nightly 32 minutes of polling a container that
+    # was already gone. start_period covers the -race compile, during which
+    # failures do not count as unhealthy.
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8080/healthz"]
+      interval: 5s
+      timeout: 5s
+      retries: 3
+      start_period: 1800s
 
   k6-race:
     profiles: [race]
@@ -73,9 +102,17 @@ services:
       CACHE: k6
       ADMIN_PASSWORD: k6-admin
       DURATION: ${DURATION:-3m}
+      # The race server builds from source on first start: modules, templ
+      # generate, then a -race compile of the whole tree. That is ~4 minutes
+      # on a 12-core box and several times that on a 2-core CI runner, where
+      # the module cache starts empty every night, so the budget is generous
+      # on purpose. It costs nothing when the server is quick: the suite
+      # starts as soon as /healthz answers.
+      BOOT_WAIT_S: ${BOOT_WAIT_S:-1800}
     command: ["run", "--summary-export=/out/summary.json", "/scripts/churn.js"]
     depends_on:
-      - xilo-race
+      xilo-race:
+        condition: service_healthy
 
 volumes:
   k6-out:

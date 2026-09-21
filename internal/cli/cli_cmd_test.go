@@ -70,17 +70,29 @@ func TestCacheLifecycle(t *testing.T) {
 	isolateEnv(t)
 	cfg := writeConfig(t, "")
 
-	out, err := runRoot(t, "--config", cfg, "cache", "create", "foo")
+	// A bare name on an empty instance is refused rather than silently
+	// creating an account called "default".
+	if _, err := runRoot(t, "--config", cfg, "cache", "create", "foo"); err == nil ||
+		!strings.Contains(err.Error(), "<account>/<name>") {
+		t.Fatalf("bare name on empty instance: err = %v", err)
+	}
+
+	out, err := runRoot(t, "--config", cfg, "cache", "create", "default/foo")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !strings.Contains(out, "created cache default/foo") || !strings.Contains(out, "trusted-public-keys = foo:") {
 		t.Fatalf("create output: %q", out)
 	}
+
+	// With exactly one account, a bare name is unambiguous and resolves.
+	if _, err := runRoot(t, "--config", cfg, "cache", "create", "bare"); err != nil {
+		t.Fatalf("bare name with one account: %v", err)
+	}
 	pubkey := ""
-	for _, line := range strings.Split(out, "\n") {
-		if i := strings.Index(line, "trusted-public-keys = "); i >= 0 {
-			pubkey = strings.TrimSpace(line[i+len("trusted-public-keys = "):])
+	for line := range strings.SplitSeq(out, "\n") {
+		if _, after, ok := strings.Cut(line, "trusted-public-keys = "); ok {
+			pubkey = strings.TrimSpace(after)
 		}
 	}
 
@@ -139,13 +151,17 @@ func TestTokenLifecycle(t *testing.T) {
 	isolateEnv(t)
 	cfg := writeConfig(t, "")
 
+	if _, err := runRoot(t, "--config", cfg, "cache", "create", "default/foo"); err != nil {
+		t.Fatal(err)
+	}
+
 	// no perms -> error
 	if _, err := runRoot(t, "--config", cfg, "token", "create", "t0"); err == nil ||
-		!strings.Contains(err.Error(), "--push / --pull") {
+		!strings.Contains(err.Error(), "--push / --pull / --manage") {
 		t.Fatalf("no-perm create: err = %v", err)
 	}
 
-	out, err := runRoot(t, "--config", cfg, "token", "create", "t1", "--push", "--pull", "--cache", "foo", "--ttl", "720h")
+	out, err := runRoot(t, "--config", cfg, "token", "create", "t1", "--push", "--pull", "--cache", "default/foo", "--ttl", "720h")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -200,34 +216,6 @@ func TestGCBadGraceFallsBack(t *testing.T) {
 	}
 	if !strings.Contains(out, `bad gc.grace "banana", using 1h`) {
 		t.Fatalf("gc output: %q", out)
-	}
-}
-
-func TestSchemaDump(t *testing.T) {
-	isolateEnv(t)
-	outFile := filepath.Join(t.TempDir(), "schema.json")
-	if _, err := runRoot(t, "schema", "dump", "--out", outFile); err != nil {
-		t.Fatal(err)
-	}
-	data, err := os.ReadFile(outFile)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var v map[string]any
-	if err := json.Unmarshal(data, &v); err != nil {
-		t.Fatalf("schema not valid JSON: %v", err)
-	}
-	if _, ok := v["properties"]; !ok {
-		t.Fatalf("schema has no properties: %v", v)
-	}
-
-	// stdout mode
-	out, err := runRoot(t, "schema", "dump")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := json.Unmarshal([]byte(out), &v); err != nil {
-		t.Fatalf("stdout schema not valid JSON: %v", err)
 	}
 }
 
@@ -294,7 +282,7 @@ func TestUseAddAndRemove(t *testing.T) {
 	srv := cacheConfigServer(t, true)
 	nixConf := filepath.Join(home, ".config", "nix", "nix.conf")
 
-	out, err := runRoot(t, "use", "c1", "--url", srv.URL)
+	out, err := runRoot(t, "use", "default/c1", "--url", srv.URL)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -311,7 +299,7 @@ func TestUseAddAndRemove(t *testing.T) {
 	}
 
 	// second cache accumulates
-	if _, err := runRoot(t, "use", "c2", "--url", srv.URL); err != nil {
+	if _, err := runRoot(t, "use", "default/c2", "--url", srv.URL); err != nil {
 		t.Fatal(err)
 	}
 	body, _ = os.ReadFile(nixConf)
@@ -321,7 +309,7 @@ func TestUseAddAndRemove(t *testing.T) {
 	}
 
 	// remove one of two
-	out, err = runRoot(t, "use", "c1", "--remove", "--url", srv.URL)
+	out, err = runRoot(t, "use", "default/c1", "--remove", "--url", srv.URL)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -342,7 +330,7 @@ func TestUsePrivateCacheWritesNetrc(t *testing.T) {
 	home := isolateEnv(t)
 	srv := cacheConfigServer(t, false)
 
-	out, err := runRoot(t, "use", "priv", "--url", srv.URL, "--token", "pulltok")
+	out, err := runRoot(t, "use", "default/priv", "--url", srv.URL, "--token", "pulltok")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -362,7 +350,7 @@ func TestUsePrivateCacheNoTokenNote(t *testing.T) {
 	home := isolateEnv(t)
 	srv := cacheConfigServer(t, false)
 
-	out, err := runRoot(t, "use", "priv", "--url", srv.URL)
+	out, err := runRoot(t, "use", "default/priv", "--url", srv.URL)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -381,7 +369,7 @@ func TestUseFetchConfigError(t *testing.T) {
 	}))
 	t.Cleanup(srv.Close)
 
-	_, err := runRoot(t, "use", "ghost", "--url", srv.URL)
+	_, err := runRoot(t, "use", "default/ghost", "--url", srv.URL)
 	if err == nil || !strings.Contains(err.Error(), "fetch cache config") {
 		t.Fatalf("err = %v, want fetch cache config", err)
 	}
@@ -390,7 +378,7 @@ func TestUseFetchConfigError(t *testing.T) {
 func TestUseRemoveNoNixConf(t *testing.T) {
 	isolateEnv(t)
 	// no nix.conf exists -> remove is a silent no-op
-	out, err := runRoot(t, "use", "c1", "--remove", "--url", "http://x")
+	out, err := runRoot(t, "use", "default/c1", "--remove", "--url", "http://x")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -410,7 +398,7 @@ func TestPushCmdEmptyStdin(t *testing.T) {
 	defer func() { os.Stdin = orig }()
 
 	// "-" with empty stdin resolves to zero paths -> nil without any network
-	if _, err := runRoot(t, "push", "--url", "http://127.0.0.1:1", "somecache", "-"); err != nil {
+	if _, err := runRoot(t, "push", "--url", "http://127.0.0.1:1", "default/somecache", "-"); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -449,14 +437,14 @@ func TestBootstrapAdmin(t *testing.T) {
 	defer db.Close()
 
 	// empty password -> no-op
-	if err := bootstrapAdmin(db, ""); err != nil {
+	if err := bootstrapAdmin(db, "", false); err != nil {
 		t.Fatal(err)
 	}
 	if db.UsersExist() {
 		t.Fatal("admin created from empty password")
 	}
 
-	if err := bootstrapAdmin(db, "hunter2"); err != nil {
+	if err := bootstrapAdmin(db, "hunter2", false); err != nil {
 		t.Fatal(err)
 	}
 	if !db.UsersExist() {
@@ -469,7 +457,7 @@ func TestBootstrapAdmin(t *testing.T) {
 	hash1 := u1.PassHash
 
 	// second bootstrap with a different password must not overwrite
-	if err := bootstrapAdmin(db, "other"); err != nil {
+	if err := bootstrapAdmin(db, "other", false); err != nil {
 		t.Fatal(err)
 	}
 	u2, _ := db.GetUserByName("admin")
@@ -580,7 +568,7 @@ func TestDefaultConfig(t *testing.T) {
 func TestRootHasSubcommands(t *testing.T) {
 	isolateEnv(t)
 	root := Root()
-	want := []string{"serve", "push", "watch", "login", "use", "cache", "token", "gc", "schema"}
+	want := []string{"serve", "push", "watch", "login", "use", "cache", "token", "gc"}
 	for _, name := range want {
 		found := false
 		for _, c := range root.Commands() {
@@ -616,7 +604,7 @@ func TestPushCmdServerError(t *testing.T) {
 	}))
 	t.Cleanup(srv.Close)
 
-	_, err := runRoot(t, "push", "c", "/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-x", "--url", srv.URL, "--quiet")
+	_, err := runRoot(t, "push", "default/c", "/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-x", "--url", srv.URL, "--quiet")
 	if err == nil || !strings.Contains(err.Error(), "fetch server config") {
 		t.Fatalf("err = %v, want fetch server config", err)
 	}
@@ -711,5 +699,45 @@ func TestLoginSaveError(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", blocker)
 	if _, err := runRoot(t, "login", "http://srv", "--token", "t"); err == nil {
 		t.Fatal("login with unwritable config dir should error")
+	}
+}
+
+// A bare cache name is resolved against the account the token belongs to,
+// which only the server knows — the client no longer guesses "default".
+func TestResolveRefUsesWhoami(t *testing.T) {
+	isolateEnv(t)
+	var account string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v1/whoami" {
+			http.Error(w, "unexpected path "+r.URL.Path, http.StatusNotFound)
+			return
+		}
+		if r.Header.Get("Authorization") != "Bearer tok" {
+			http.Error(w, "bad token", http.StatusUnauthorized)
+			return
+		}
+		json.NewEncoder(w).Encode(api.WhoamiResp{Token: "ci", Account: account, Cache: account + "/web"})
+	}))
+	t.Cleanup(srv.Close)
+
+	account = "acme"
+	got, err := resolveRef(srv.URL, "tok", "web")
+	if err != nil || got != "acme/web" {
+		t.Fatalf("bare name = %q, %v", got, err)
+	}
+	// An explicit account is never second-guessed (no round trip needed).
+	if got, err := resolveRef("http://unreachable", "", "beta/web"); err != nil || got != "beta/web" {
+		t.Fatalf("qualified name = %q, %v", got, err)
+	}
+	// An instance-wide token names no account, so it cannot resolve one.
+	account = ""
+	if _, err := resolveRef(srv.URL, "tok", "web"); err == nil ||
+		!strings.Contains(err.Error(), "<account>/web") {
+		t.Fatalf("instance token: err = %v", err)
+	}
+	// No token at all: say so, rather than inventing an account.
+	if _, err := resolveRef(srv.URL, "", "web"); err == nil ||
+		!strings.Contains(err.Error(), "<account>/web") {
+		t.Fatalf("no token: err = %v", err)
 	}
 }

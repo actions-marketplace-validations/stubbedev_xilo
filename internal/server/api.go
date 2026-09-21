@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"math"
@@ -29,10 +30,7 @@ func timeNow() int64 { return time.Now().Unix() }
 // server's configured chunking bounds so raising max_size/nar_threshold above
 // the old hardcoded 4 MiB doesn't silently truncate uploads.
 func (s *Server) maxChunkBody() int64 {
-	n := s.cfg.Chunking.MaxSize
-	if s.cfg.Chunking.NarThreshold > n {
-		n = s.cfg.Chunking.NarThreshold
-	}
+	n := max(s.cfg.Chunking.NarThreshold, s.cfg.Chunking.MaxSize)
 	return int64(n) + (1 << 20) // slack
 }
 
@@ -74,7 +72,7 @@ func (s *Server) handleMissingPaths(w http.ResponseWriter, r *http.Request) {
 	if !s.requirePush(w, r, c) {
 		return
 	}
-	if err := s.checkStorageQuota(c); err != nil {
+	if err := s.checkStorageQuota(r.Context(), c); err != nil {
 		http.Error(w, err.Error(), http.StatusForbidden)
 		return
 	}
@@ -307,7 +305,7 @@ func (s *Server) handlePutPath(w http.ResponseWriter, r *http.Request) {
 	if !s.requirePush(w, r, c) {
 		return
 	}
-	if err := s.checkStorageQuota(c); err != nil {
+	if err := s.checkStorageQuota(r.Context(), c); err != nil {
 		http.Error(w, err.Error(), http.StatusForbidden)
 		return
 	}
@@ -376,9 +374,9 @@ func (s *Server) handlePutPath(w http.ResponseWriter, r *http.Request) {
 	//
 	// The dedup pool is shared across tenants, so this check is the ONLY thing
 	// stopping one tenant from registering a path that references another
-	// tenant's chunk hashes and reading their private bytes. Never skip it in
-	// multi-tenant mode, regardless of the operator's SkipUploadVerify setting.
-	if s.cfg.MultiTenant || !s.cfg.Security.SkipUploadVerify {
+	// tenant's chunk hashes and reading their private bytes. Never skip it on
+	// an instance anyone can sign up to, regardless of SkipUploadVerify.
+	if s.cfg.SelfService || !s.cfg.Security.SkipUploadVerify {
 		// A chunk list already proven to hash to this NarHash on this backend
 		// cannot stop hashing to it, so the re-read is skippable — but the
 		// blobs behind it can still go missing, and the reassembly stream is
@@ -494,7 +492,7 @@ func (s *Server) verifyReassembly(r *http.Request, storageName string, chunkHash
 	}
 	got := "sha256:" + narinfo.Base32Encode(h.Sum(nil))
 	if got != narHash {
-		return fmt.Errorf("nar hash mismatch")
+		return errors.New("nar hash mismatch")
 	}
 	return nil
 }

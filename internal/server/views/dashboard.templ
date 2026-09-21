@@ -7,7 +7,6 @@ import (
 	"github.com/stubbedev/xilo/internal/store"
 
 	"github.com/templui/templui/components/button"
-	"github.com/templui/templui/components/card"
 	"github.com/templui/templui/components/dialog"
 	"github.com/templui/templui/components/input"
 	"github.com/templui/templui/components/progress"
@@ -15,96 +14,94 @@ import (
 )
 
 templ Dashboard(d DashboardData) {
-	@Layout(T("dash.title"), "caches", d.Nav, d.Flash) {
-		if d.Nav.Active != "" {
-			@PageHeader(T("dash.title"), T("dash.scopedto")+" "+d.Nav.Active+".")
+	@Layout(T(ctx, "dash.title"), "caches", d.Nav, d.Flash) {
+		if len(d.Nav.Contexts) > 1 {
+			@PageHeader(T(ctx, "dash.title"), Tf(ctx, "dash.scopedto", d.Nav.Active))
 		} else {
-			@PageHeader(T("dash.title"), T("dash.subtitle"))
+			@PageHeader(T(ctx, "dash.title"), T(ctx, "dash.subtitle"))
 		}
-		<div class="mb-8 grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
-			@StatTile("database", Count(d.Global.Caches), T("kpi.caches"), "", "")
-			@StatTile("package", Count(d.Global.Paths), T("kpi.paths"), "", "")
-			@StatTile("hard-drive", d.Bytes(d.Global.StoredBytes), T("kpi.disk")+capSuffix(d.ServerCap, d.Bytes), "", "")
-			@StatTile("layers", dedupRatio(d.Global.LogicalBytes, d.Global.StoredBytes)+"×", T("kpi.dedup"), "", "")
-		</div>
-		if d.ServerCap > 0 {
-			<div class="mb-8">
-				@progress.Progress(progress.Props{Value: fillPct(d.Global.StoredBytes, d.ServerCap), Size: progress.SizeSm, Variant: capVariant(d.Global.StoredBytes, d.ServerCap)})
-			</div>
+		@DedupBar(d.Global.LogicalBytes, d.Global.StoredBytes, dedupRatio(d.Global.LogicalBytes, d.Global.StoredBytes), d.Bytes)
+		@StatRow() {
+			@StatTile("database", Count(d.Global.Caches), T(ctx, "kpi.caches"), "", "")
+			@StatTile("package", Count(d.Global.Paths), T(ctx, "kpi.paths"), "", "")
+			@StatTile("hard-drive", d.Bytes(d.Global.StoredBytes), T(ctx, "kpi.disk")+capSuffix(d.ServerCap, d.Bytes), "", capTone(d.Global.StoredBytes, d.ServerCap))
 		}
-		@SectionHeader(T("caches.title")) {
-			@SearchInput("/admin", "caches[q]", d.CacheQuery, T("caches.search"), "#cache-list")
-			if len(d.Accounts) > 0 {
-				@newCacheDialog(d)
-			} else {
-				@disabledCreate(T("caches.new"), T("caches.needaccount"))
+		// Nothing to search and nothing to list yet: the onboarding block is the
+		// whole section, and it carries the only create button. A search box
+		// over an empty list, and a second New beside its own step 1, are just
+		// controls asking to be ignored.
+		if !firstRun(d) {
+			@SectionHeader(T(ctx, "caches.title")) {
+				@SearchInput("/admin", "caches[q]", d.CacheQuery, T(ctx, "caches.search"), "#cache-list")
+				if len(d.Accounts) > 0 {
+					@newCacheDialog(d)
+				} else {
+					@disabledCreate(T(ctx, "caches.new"), T(ctx, "caches.needaccount"))
+				}
 			}
 		}
+		// The list ids are htmx swap targets, so these two sections keep their
+		// own wrappers instead of going through ListSection.
 		<div id="cache-list" class="mb-8">
 			if len(d.Caches) == 0 {
 				if d.CacheQuery != "" {
-					@EmptyState("database", T("caches.nomatch"))
+					@EmptyState("database", T(ctx, "empty.nomatch"))
 				} else {
-					@EmptyState("database", T("caches.empty")) {
-						if len(d.Accounts) > 0 {
-							@dialog.Trigger(dialog.TriggerProps{For: "dlg-cache"}) {
-								@button.Button(button.Props{Size: button.SizeSm}) {
-									@Icon("plus")
-									<span>{ T("caches.new") }</span>
-								}
-							}
-						} else {
-							@disabledCreate(T("caches.new"), T("caches.needaccount"))
-						}
-					}
+					@onboarding(d)
 				}
 			} else {
-				@card.Card(card.Props{Class: "divide-y p-0"}) {
+				<div class="divide-y border-y">
 					for _, u := range d.Caches {
 						@cacheRow(u, d.Bytes)
 					}
-				}
+				</div>
 				@PagerNav(d.CachePager)
 			}
 		</div>
-		@SectionHeader(T("tokens.title")) {
-			@SearchInput("/admin", "tokens[q]", d.TokenQuery, T("tokens.search"), "#token-list")
-			if canMintToken(d) {
-				@newTokenDialog(d)
-			} else {
-				@disabledCreate(T("tokens.new"), T("tokens.needcache"))
+		// Before the first cache exists there is nothing to scope a token to,
+		// and step 2 already says where tokens come from. An empty token
+		// section with a disabled button would only repeat it.
+		if !firstRun(d) {
+			@SectionHeader(T(ctx, "tokens.title")) {
+				if !noTokensYet(d) {
+					@SearchInput("/admin", "tokens[q]", d.TokenQuery, T(ctx, "tokens.search"), "#token-list")
+					if canMintToken(d) {
+						@newTokenDialog(d)
+					} else {
+						@disabledCreate(T(ctx, "tokens.new"), T(ctx, "tokens.needcache"))
+					}
+				}
 			}
-		}
-		<div id="token-list">
+			<div id="token-list">
 			if len(d.Tokens) == 0 {
 				if d.TokenQuery != "" {
-					@EmptyState("key-round", T("tokens.nomatch"))
+					@EmptyState("key-round", T(ctx, "empty.nomatch"))
 				} else {
-					@EmptyState("key-round", T("tokens.empty")) {
+					// The empty state owns the create button here, so it has to
+					// carry the dialog itself — the header's copy is not rendered.
+					@EmptyState("key-round", T(ctx, "empty.none")) {
 						if canMintToken(d) {
-							@dialog.Trigger(dialog.TriggerProps{For: "dlg-token"}) {
-								@button.Button(button.Props{Size: button.SizeSm}) {
-									@Icon("plus")
-									<span>{ T("tokens.new") }</span>
-								}
-							}
+							@newTokenDialog(d)
 						} else {
-							@disabledCreate(T("tokens.new"), T("tokens.needcache"))
+							@disabledCreate(T(ctx, "tokens.new"), T(ctx, "tokens.needcache"))
 						}
 					}
 				}
 			} else {
-				@card.Card(card.Props{Class: "p-0"}) {
+				@TableCard() {
 					@table.Table(table.Props{Class: "table-fixed"}) {
 						@table.Header() {
 							@table.Row() {
-								@SortHead(d.TokenSort, "name", T("tokens.name"), "")
-								@SortHead(d.TokenSort, "perms", T("tokens.perms"), "w-36")
-								@SortHead(d.TokenSort, "scope", T("tokens.scope"), "w-36")
-								@SortHead(d.TokenSort, "expires", T("tokens.expires"), "w-28")
-								@SortHead(d.TokenSort, "status", T("tokens.status"), "w-24")
+								// The scope column takes the slack, not the name:
+								// a cache reference is the long value here, and
+								// names sat alone in 500px of nothing.
+								@SortHead(d.TokenSort, "name", T(ctx, "tokens.name"), "w-64")
+								@SortHead(d.TokenSort, "perms", T(ctx, "tokens.perms"), "w-32")
+								@SortHead(d.TokenSort, "scope", T(ctx, "tokens.scope"), "")
+								@SortHead(d.TokenSort, "expires", T(ctx, "tokens.expires"), "w-28")
+								@SortHead(d.TokenSort, "status", T(ctx, "tokens.status"), "w-20")
 								@table.Head(table.HeadProps{Class: "w-24 text-right"}) {
-									{ T("tokens.actions") }
+									{ T(ctx, "tokens.actions") }
 								}
 							}
 						}
@@ -115,36 +112,93 @@ templ Dashboard(d DashboardData) {
 						}
 					}
 				}
-				@PagerNav(d.TokenPager)
-			}
-		</div>
+					@PagerNav(d.TokenPager)
+				}
+			</div>
+		}
 	}
 }
 
-// cacheRow is one cache line: name, visibility, footprint, usage bar.
+// onboarding replaces the empty cache list with the three steps that get a
+// first cache working. A blank dashboard with two disabled buttons told a new
+// operator nothing about what to do next.
+templ onboarding(d DashboardData) {
+	// A section, not a dashed card holding three more boxes: the steps are a
+	// list, and a list is ruled rows.
+	<div>
+		<div class="mb-3">
+			<h2 class="text-base font-semibold tracking-tight">{ T(ctx, "onb.title") }</h2>
+			<p class="text-sm text-muted-foreground">{ T(ctx, "onb.subtitle") }</p>
+		</div>
+		<div class="divide-y border-y">
+			@onboardStep("1", T(ctx, "onb.step1"), T(ctx, "onb.step1hint")) {
+				// The whole dialog, not just a trigger: on first run this is the
+				// only create control on the page, so the markup it opens has to
+				// come with it.
+				if len(d.Accounts) > 0 {
+					@newCacheDialog(d)
+				} else {
+					@disabledCreate(T(ctx, "caches.new"), T(ctx, "caches.needaccount"))
+				}
+			}
+			@onboardStep("2", T(ctx, "onb.step2"), T(ctx, "onb.step2hint")) {
+			}
+			@onboardStep("3", T(ctx, "onb.step3"), T(ctx, "onb.step3hint")) {
+			}
+		</div>
+	</div>
+}
+
+// onboardStep is one numbered row of the first-run checklist. Numbered because
+// this genuinely is a sequence — the only place in the admin where a number
+// in front of a heading means anything.
+templ onboardStep(n, title, hint string) {
+	<div class="flex items-center gap-3 py-3">
+		<span class="flex size-6 shrink-0 items-center justify-center rounded-full bg-accent text-xs font-medium text-accent-foreground tabular-nums">{ n }</span>
+		<div class="min-w-0 flex-1">
+			<p class="text-sm font-medium">{ title }</p>
+			<p class="text-xs text-muted-foreground">{ hint }</p>
+		</div>
+		<div class="shrink-0">
+			{ children... }
+		</div>
+	</div>
+}
+
+// cacheRow is one cache line: name, visibility, footprint, path count. The
+// quantities sit in their own right-aligned mono columns instead of a
+// "26.6 MiB / 512 MiB · 24 paths" run-on — columns can be scanned down a list,
+// a sentence has to be read row by row.
 templ cacheRow(u CacheUsage, bytes func(int64) string) {
-	<div class="flex flex-col gap-2 p-4 sm:flex-row sm:items-center sm:justify-between">
-		<div class="flex items-center gap-2">
-			<a href={ templ.SafeURL("/admin/cache/" + u.Cache.Ref()) } class="font-medium hover:underline">
+	<div class="flex flex-col gap-1.5 py-2.5 sm:flex-row sm:items-center sm:justify-between sm:gap-6">
+		<div class="flex min-w-0 shrink-0 items-center gap-2">
+			// Shares its view-transition name with the cache page's title, so the
+			// row is what travels when you open it (vtStyle). `block` is load-bearing:
+			// a named inline element that breaks across lines makes several boxes, and
+			// the browser skips the whole transition rather than animate one of them.
+			<a href={ templ.SafeURL("/admin/cache/" + u.Cache.Ref()) } class="block truncate text-sm font-medium hover:underline" style={ vtStyle(u.Cache.Ref()) }>
 				<span class="text-muted-foreground">{ u.Cache.Account }/</span>{ u.Cache.Name }
 			</a>
 			@VisBadge(u.Cache.Public)
 		</div>
-		<div class="flex items-center gap-3 sm:w-72">
-			<div class="min-w-0 flex-1">
-				if u.Cache.MaxBytes > 0 {
-					@progress.Progress(progress.Props{Value: u.Pct(), Size: progress.SizeSm, Variant: capVariant(u.Bytes, u.Cache.MaxBytes)})
-				} else {
-					@progress.Progress(progress.Props{Value: 100, Size: progress.SizeSm, BarClass: "bg-muted-foreground/30"})
-				}
-			</div>
-			<span class="shrink-0 whitespace-nowrap text-xs text-muted-foreground tabular-nums">
+		// The quota bar takes the slack between the name and the figures rather
+		// than a 4rem sliver pinned to them: it is the one part of the row that
+		// can use a wide screen, and how full a cache is reads off its length.
+		// It keeps to its own box, so the byte columns stay aligned down the
+		// list whether or not a cache has a quota at all.
+		<div class="hidden min-w-0 flex-1 justify-end sm:flex">
+			if u.Cache.MaxBytes > 0 {
+				@progress.Progress(progress.Props{Value: u.Pct(), Size: progress.SizeSm, Class: "w-full max-w-80 [&>div]:rounded-none", BarClass: "rounded-none " + capBar(u.Bytes, u.Cache.MaxBytes)})
+			}
+		</div>
+		<div class="flex shrink-0 items-center gap-5 whitespace-nowrap font-mono text-xs tabular-nums">
+			<span class={ "w-40 text-right", capTone(u.Bytes, u.Cache.MaxBytes) }>
 				{ bytes(u.Bytes) }
 				if u.Cache.MaxBytes > 0 {
-					{ " / " + bytes(u.Cache.MaxBytes) }
+					<span class="text-muted-foreground">{ " / " + bytes(u.Cache.MaxBytes) }</span>
 				}
-				· { Count(u.Paths) } { T("cache.paths") }
 			</span>
+			<span class="w-20 text-right text-muted-foreground">{ Count(u.Paths) } { T(ctx, "cache.paths") }</span>
 		</div>
 	</div>
 }
@@ -156,26 +210,36 @@ templ tokenRow(d DashboardData, t store.Token) {
 			{ t.Name }
 		}
 		@table.Cell() {
-			@PermBadges(t.Perms)
+			@PermBadges(displayPerms(t))
 		}
-		@table.Cell() {
-			if t.AccountID != 0 {
-				<span class="text-muted-foreground">{ t.Account }:</span>
-			}
+		@table.Cell(table.CellProps{Class: "font-mono text-xs"}) {
 			if scopeAll(t.Caches) {
-				<span class="text-muted-foreground">{ T("tokens.all") }</span>
+				// Not "all caches": this scope grants no cache access at all, it
+				// grants instance-wide management. One glyph, like every other
+				// state in these tables (StatusIcon, RoleIcon) — the word rides
+				// in the tooltip and the aria-label, and the column keeps to the
+				// cache references it is a column of.
+				@WithTooltip(T(ctx, "tokens.roothint")) {
+					<span class="inline-flex text-warning" role="img" aria-label={ T(ctx, "tokens.root") }>
+						@Icon("shield-alert")
+					</span>
+				}
+			} else if t.AccountID != 0 {
+				// account/cache — the shape a cache reference has everywhere else on
+				// the site. "default: ci" read as a label and a value.
+				<span class="text-muted-foreground">{ t.Account + "/" }</span>{ strings.Join(t.Caches, ", ") }
 			} else {
 				{ strings.Join(t.Caches, ", ") }
 			}
 		}
-		@table.Cell(table.CellProps{Class: "text-muted-foreground"}) {
-			{ TokenExpiry(t) }
+		@table.Cell(table.CellProps{Class: "font-mono text-xs text-muted-foreground tabular-nums"}) {
+			{ TokenExpiry(ctx, t) }
 		}
 		@table.Cell() {
-			@StatusBadge(TokenStatus(t))
+			@StatusIcon(TokenStatus(t))
 		}
 		@table.Cell(table.CellProps{Class: "text-right"}) {
-			<div class="flex justify-end gap-1">
+			@RowActions() {
 				if !t.Revoked {
 					@editTokenDialog(d, t)
 				}
@@ -183,18 +247,18 @@ templ tokenRow(d DashboardData, t store.Token) {
 					@ConfirmForm(Confirm{
 						ID:             "revoke-" + strconv.FormatInt(t.ID, 10),
 						Action:         "/admin/tokens/" + strconv.FormatInt(t.ID, 10) + "/revoke",
-						Title:          T("tok.revoketitle"),
-						Message:        "“" + t.Name + "” " + T("tok.revokemsg"),
-						ConfirmLabel:   T("tokens.revoke"),
+						Title:          T(ctx, "tok.revoketitle"),
+						Message:        Tf(ctx, "tok.revokemsg", t.Name),
+						ConfirmLabel:   T(ctx, "tokens.revoke"),
 						ConfirmIcon:    "ban",
 						Danger:         true,
 						TriggerIcon:    "ban",
 						IconOnly:       true,
-						TriggerTooltip: T("tokens.revoke"),
+						TriggerTooltip: T(ctx, "tokens.revoke"),
 						TriggerVariant: button.VariantGhost,
 					})
 				}
-			</div>
+			}
 		}
 	}
 }
@@ -203,7 +267,9 @@ templ tokenRow(d DashboardData, t store.Token) {
 // tooltip says what is missing.
 templ disabledCreate(label, why string) {
 	@WithTooltip(why) {
-		@button.Button(button.Props{Size: button.SizeSm, Disabled: true}) {
+		// Outline, like every other create trigger: a filled primary button
+		// that cannot be pressed reads as the thing to do next.
+		@button.Button(button.Props{Size: button.SizeSm, Variant: button.VariantOutline, Disabled: true}) {
 			@Icon("plus")
 			<span>{ label }</span>
 		}
@@ -214,45 +280,24 @@ templ disabledCreate(label, why string) {
 templ newCacheDialog(d DashboardData) {
 	@dialog.Dialog(dialog.Props{ID: "dlg-cache"}) {
 		@dialog.Trigger(dialog.TriggerProps{For: "dlg-cache"}) {
-			@button.Button(button.Props{Size: button.SizeSm}) {
-				@Icon("plus")
-				<span>{ T("caches.new") }</span>
-			}
+			@PlusButton(T(ctx, "action.new"))
 		}
-		@dialog.Content(dialog.ContentProps{Class: "text-left sm:max-w-lg"}) {
-			@dialog.Header() {
-				@dialog.Title() {
-					{ T("caches.new") }
-				}
-				@dialog.Description() {
-					{ T("caches.newhint") }
-				}
-			}
+		@DialogBox(T(ctx, "caches.new"), T(ctx, "caches.newhint"), true) {
 			<form method="post" action="/admin/caches" class="mt-2 space-y-4">
-				@Field("", T("caches.account")) {
-					@AccountSelect("namespace", activeOr(d.Nav, defaultAccount(d.Accounts)), T("caches.pickaccount"), d.Accounts)
+				@Field("", T(ctx, "caches.account")) {
+					@AccountSelect("namespace", defaultAccount(d), T(ctx, "caches.pickaccount"), d.Accounts)
 				}
-				@Field("cache-name", T("caches.name")) {
-					@input.Input(input.Props{ID: "cache-name", Name: "name", Placeholder: T("ph.cachename"), Required: true, Attributes: templ.Attributes{"pattern": "[-a-zA-Z0-9_]+"}})
+				@Field("cache-name", T(ctx, "caches.name")) {
+					@input.Input(input.Props{ID: "cache-name", Name: "name", Placeholder: T(ctx, "ph.cachename"), Required: true, Attributes: templ.Attributes{"pattern": "[-a-zA-Z0-9_]+", "autocomplete": "off"}})
 				}
 				if d.IsAdmin && len(d.Storages) > 1 {
-					@Field("", T("caches.storage")) {
+					@Field("", T(ctx, "caches.storage")) {
 						@StorageSelect("storage", firstStr(d.Storages), d.Storages)
 					}
 				}
 				@VisibilitySwitch(false)
 				@PriorityField(40)
-				@dialog.Footer() {
-					@dialog.Close(dialog.CloseProps{For: "dlg-cache"}) {
-						@button.Button(button.Props{Variant: button.VariantOutline, Type: button.TypeButton}) {
-							{ T("action.cancel") }
-						}
-					}
-					@button.Button(button.Props{Type: button.TypeSubmit}) {
-						@Icon("plus")
-						<span>{ T("caches.create") }</span>
-					}
-				}
+				@DialogFooter("dlg-cache", "plus", T(ctx, "action.create"))
 			</form>
 		}
 	}
@@ -262,21 +307,10 @@ templ newCacheDialog(d DashboardData) {
 templ newTokenDialog(d DashboardData) {
 	@dialog.Dialog(dialog.Props{ID: "dlg-token"}) {
 		@dialog.Trigger(dialog.TriggerProps{For: "dlg-token"}) {
-			@button.Button(button.Props{Size: button.SizeSm}) {
-				@Icon("plus")
-				<span>{ T("tokens.new") }</span>
-			}
+			@PlusButton(T(ctx, "action.new"))
 		}
-		@dialog.Content(dialog.ContentProps{Class: "text-left sm:max-w-lg"}) {
-			@dialog.Header() {
-				@dialog.Title() {
-					{ T("tokens.newtitle") }
-				}
-				@dialog.Description() {
-					{ T("tokens.newhint") }
-				}
-			}
-			@tokenFormBody("/admin/tokens", nil, d, "plus", T("tokens.create"), "dlg-token")
+		@DialogBox(T(ctx, "tokens.newtitle"), T(ctx, "tokens.newhint"), true) {
+			@tokenFormBody("/admin/tokens", nil, d, "plus", T(ctx, "action.create"), "dlg-token")
 		}
 	}
 }
@@ -286,22 +320,10 @@ templ editTokenDialog(d DashboardData, t store.Token) {
 	{{ id := "dlg-token-edit-" + strconv.FormatInt(t.ID, 10) }}
 	@dialog.Dialog(dialog.Props{ID: id}) {
 		@dialog.Trigger(dialog.TriggerProps{For: id}) {
-			@WithTooltip(T("tokens.edit")) {
-				@button.Button(button.Props{Variant: button.VariantGhost, Size: button.SizeIcon, Type: button.TypeButton, Attributes: templ.Attributes{"aria-label": T("tokens.edit")}}) {
-					@Icon("square-pen")
-				}
-			}
+			@RowAction("square-pen", T(ctx, "action.edit"), false)
 		}
-		@dialog.Content(dialog.ContentProps{Class: "text-left sm:max-w-lg"}) {
-			@dialog.Header() {
-				@dialog.Title() {
-					{ T("tokens.edittitle") }
-				}
-				@dialog.Description() {
-					{ T("tokens.edithint") }
-				}
-			}
-			@tokenFormBody("/admin/tokens/"+strconv.FormatInt(t.ID, 10)+"/edit", &t, d, "check", T("action.savechanges"), id)
+		@DialogBox(T(ctx, "tokens.edittitle"), T(ctx, "tokens.edithint"), true) {
+			@tokenFormBody("/admin/tokens/"+strconv.FormatInt(t.ID, 10)+"/edit", &t, d, "check", T(ctx, "action.save"), id)
 		}
 	}
 }
@@ -309,39 +331,20 @@ templ editTokenDialog(d DashboardData, t store.Token) {
 // tokenFormBody is the shared create/edit token form; t is nil on create.
 templ tokenFormBody(action string, t *store.Token, d DashboardData, submitIcon, submitLabel, dlgID string) {
 	<form method="post" action={ templ.SafeURL(action) } class="mt-2 space-y-4">
-		@Field(dlgID+"-name", T("tokens.name")) {
-			@input.Input(input.Props{ID: dlgID + "-name", Name: "name", Value: tokenName(t), Placeholder: T("ph.tokenname"), Required: true})
+		@Field(dlgID+"-name", T(ctx, "tokens.name")) {
+			@input.Input(input.Props{ID: dlgID + "-name", Name: "name", Value: tokenName(t), Placeholder: T(ctx, "ph.tokenname"), Required: true, Attributes: templ.Attributes{"autocomplete": "off"}})
 		}
-		@Field(dlgID+"-ns", T("caches.account")) {
-			@input.Input(input.Props{ID: dlgID + "-ns", Value: tokenAccount(t, d), Disabled: true})
-		}
-		@Field("", T("tokens.scope")) {
+		@FieldInfo("", T(ctx, "tokens.scope"), T(ctx, "tokens.scopehint")) {
 			@ScopeSelect("cache", tokenScopeValue(t, d), tokenScopeCaches(t, d))
 		}
-		@Field("", T("tokens.perms")) {
-			<div class="space-y-2">
-				@PermSwitchID(dlgID+"-push", "push", "on", T("tokens.push"), tokenPerm(t, "push"))
-				@PermSwitchID(dlgID+"-pull", "pull", "on", T("tokens.pull"), tokenPerm(t, "pull"))
-			</div>
-		}
-		@Field("", T("tokens.expiry")) {
-			<div class="group/expiry space-y-2">
-				@PermSwitchID(dlgID+"-permanent", "permanent", "on", T("tokens.permanent"), tokenPermanent(t))
-				<div class="group-has-[:checked]/expiry:hidden">
-					@TTLSelect(t)
-				</div>
-			</div>
-		}
-		@dialog.Footer() {
-			@dialog.Close(dialog.CloseProps{For: dlgID}) {
-				@button.Button(button.Props{Variant: button.VariantOutline, Type: button.TypeButton}) {
-					{ T("action.cancel") }
-				}
-			}
-			@button.Button(button.Props{Type: button.TypeSubmit}) {
-				@Icon(submitIcon)
-				<span>{ submitLabel }</span>
+		@Field("", T(ctx, "tokens.perms")) {
+			@SwitchGroup() {
+				@PermSwitchID(dlgID+"-push", "push", "on", T(ctx, "tokens.push"), tokenPerm(t, "push"))
+				@PermSwitchID(dlgID+"-pull", "pull", "on", T(ctx, "tokens.pull"), tokenPerm(t, "pull"))
+				@PermSwitchID(dlgID+"-manage", "manage", "on", T(ctx, "tokens.manage"), tokenPerm(t, "manage"))
 			}
 		}
+		@ExpiryField(dlgID, t)
+		@DialogFooter(dlgID, submitIcon, submitLabel)
 	</form>
 }

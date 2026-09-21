@@ -7,100 +7,132 @@ import (
 
 	"github.com/templui/templui/components/badge"
 	"github.com/templui/templui/components/button"
-	"github.com/templui/templui/components/card"
 	"github.com/templui/templui/components/dialog"
-	"github.com/templui/templui/components/form"
 	"github.com/templui/templui/components/input"
-	"github.com/templui/templui/components/switch"
+	"github.com/templui/templui/components/selectbox"
 	"github.com/templui/templui/components/table"
 )
 
 // InstanceData is the admin-only settings page: policy, plans, users, orgs.
 type InstanceData struct {
 	Nav         Nav
-	MultiTenant bool
+	SelfService bool
 	AllowRegs   bool
 	RequireOK   bool
 	Plans       []store.Plan
 	Users       []store.User
-	Orgs        []OrgInfo // organizations only, never personal accounts
-	Flash       Flash
+	// Instance rules — the ceilings and defaults the sysadmin sets for
+	// everyone. Zero means the instance imposes nothing.
+	InstanceCap    int64 // bytes across every cache
+	DefaultRetain  int64 // seconds a new cache keeps a path
+	MaxTokenTTL    int64 // seconds, the longest a token may live
+	DefaultPlan    int64 // the plan a signup with no choice lands on
+	Flash          Flash
 }
 
 // Instance is the general settings page (instance admins).
 templ Instance(d InstanceData) {
-	@Layout(T("nav.settings"), "settings", d.Nav, d.Flash) {
-		if d.MultiTenant {
-			@PageHeader(T("set.instance"), T("inst.subtitle"))
+	@Layout(T(ctx, "nav.settings"), "settings", d.Nav, d.Flash) {
+		if d.SelfService {
+			@PageHeader(T(ctx, "set.instance"), T(ctx, "inst.subtitle"))
 		} else {
-			@PageHeader(T("set.instance"), T("inst.subtitle.single"))
+			@PageHeader(T(ctx, "set.instance"), T(ctx, "inst.subtitle.single"))
 		}
-		<div class="grid gap-6">
-			if d.MultiTenant {
-				@policyCard(d)
+		<div class="grid gap-8">
+			if d.SelfService {
+				@policySection(d)
+			}
+			@rulesSection(d)
+			if d.SelfService {
 				@plansCard(d.Plans)
 			}
-			@usersCard(d.Nav.UserName, d.MultiTenant, d.Users)
-			@orgsCard(d.Orgs)
+			@usersCard(d.Nav.UserName, d.SelfService, d.Users)
 			@maintCard()
 		</div>
 	}
 }
 
-// policyCard is the registration-policy panel (multi-tenant only).
-templ policyCard(d InstanceData) {
-	@card.Card() {
-		@card.Header() {
-			@card.Title() {
-				{ T("inst.policy") }
-			}
-		}
-		@card.Content() {
-			<form method="post" action="/admin/settings/instance" class="space-y-3">
-				@form.ItemFlex(form.ItemProps{Class: "justify-between rounded-lg border p-3"}) {
-					@form.Label(form.LabelProps{For: "allow_registrations"}) {
-						{ T("inst.regs") }
-					}
-					@switchcomp.Switch(switchcomp.Props{ID: "allow_registrations", Name: "allow_registrations", Value: "on", Checked: d.AllowRegs})
+// policySection is the registration policy (multi-tenant only): two switches
+// that save the moment they are flipped, the way the account page's appearance
+// controls do. Nothing here is filled in, so nothing here is a card with a Save
+// button — it is a ruled section like the rest of the page.
+templ policySection(d InstanceData) {
+	@ListSection(T(ctx, "inst.policy"), nil) {
+		<form method="post" action="/admin/settings/instance" class="border-y" onchange="this.requestSubmit()">
+			@PermSwitchID("allow_registrations", "allow_registrations", "on", T(ctx, "inst.regs"), d.AllowRegs)
+			@PermSwitchID("require_approval", "require_approval", "on", T(ctx, "inst.approve"), d.RequireOK)
+		</form>
+	}
+}
+
+// rulesSection is what a sysadmin sets for everyone: ceilings and defaults
+// that apply wherever they are relevant rather than at boot, so changing one
+// needs no restart. Every field here has one enforcement site — see rules.go —
+// and every field empty means the instance imposes nothing, which is what a
+// hobbyist's instance looks like.
+templ rulesSection(d InstanceData) {
+	@ListSection(T(ctx, "rules.title"), nil) {
+		<form method="post" action="/admin/settings/rules" class="space-y-4 border-y py-4">
+			<div class="grid items-start gap-4 sm:grid-cols-2 xl:grid-cols-4">
+				@FieldInfo("", T(ctx, "rules.cap"), T(ctx, "rules.caphint")) {
+					@SizeInput("instance_cap", d.InstanceCap)
 				}
-				@form.ItemFlex(form.ItemProps{Class: "justify-between rounded-lg border p-3"}) {
-					@form.Label(form.LabelProps{For: "require_approval"}) {
-						{ T("inst.approve") }
-					}
-					@switchcomp.Switch(switchcomp.Props{ID: "require_approval", Name: "require_approval", Value: "on", Checked: d.RequireOK})
+				@FieldInfo("", T(ctx, "rules.retention"), T(ctx, "rules.retentionhint")) {
+					@DurationInput("default_retention", d.DefaultRetain)
 				}
+				@FieldInfo("", T(ctx, "rules.tokenttl"), T(ctx, "rules.tokenttlhint")) {
+					@DurationInput("max_token_ttl", d.MaxTokenTTL)
+				}
+				if d.SelfService {
+					@FieldInfo("", T(ctx, "rules.defaultplan"), T(ctx, "rules.defaultplanhint")) {
+						@planSelect(d.Plans, d.DefaultPlan)
+					}
+				}
+			</div>
+			<div class="flex justify-end">
 				@button.Button(button.Props{Type: button.TypeSubmit}) {
 					@Icon("check")
-					<span>{ T("inst.savepolicy") }</span>
+					<span>{ T(ctx, "action.save") }</span>
 				}
-			</form>
+			</div>
+		</form>
+	}
+}
+
+// planSelect picks the signup default; "none" leaves signups choosing.
+templ planSelect(plans []store.Plan, selected int64) {
+	@selectbox.SelectBox() {
+		@selectbox.Trigger(selectbox.TriggerProps{Name: "default_plan", Attributes: templ.Attributes{"aria-label": T(ctx, "rules.defaultplan")}}) {
+			@selectbox.Value(selectbox.ValueProps{Placeholder: T(ctx, "rules.noplan")})
+		}
+		@selectbox.Content(selectbox.ContentProps{NoSearch: noSearch(len(plans) + 1)}) {
+			@selectbox.Item(selectbox.ItemProps{Value: "0", Selected: selected == 0}) {
+				{ T(ctx, "rules.noplan") }
+			}
+			for _, p := range plans {
+				@selectbox.Item(selectbox.ItemProps{Value: itoa(p.ID), Selected: p.ID == selected}) {
+					{ p.Name }
+				}
+			}
 		}
 	}
 }
 
-// plansCard lists plans and holds the create-plan dialog.
+// plansCard lists plans and holds the create-plan dialog. A list is a section
+// on the page, not an object in a box — the card wall around a bordered list
+// was two frames drawn around the same rows.
 templ plansCard(plans []store.Plan) {
-	@card.Card() {
-		@card.Header(card.HeaderProps{Class: "flex-row items-center justify-between space-y-0"}) {
-			@card.Title() {
-				{ T("set.plans") }
+	// With no plans yet the empty state carries the only create button — and
+	// therefore the dialog too, since the header's copy is not rendered.
+	@ListSection(T(ctx, "set.plans"), sectionAction(len(plans) > 0, newPlanDialog())) {
+		if len(plans) == 0 {
+			@EmptyState("layers", T(ctx, "empty.none")) {
+				@newPlanDialog()
 			}
-			@newPlanDialog()
-		}
-		@card.Content(card.ContentProps{Class: "space-y-2"}) {
-			if len(plans) == 0 {
-				@EmptyState("layers", T("plan.empty")) {
-					@dialog.Trigger(dialog.TriggerProps{For: "dlg-plan-new"}) {
-						@button.Button(button.Props{Size: button.SizeSm}) {
-							@Icon("plus")
-							<span>{ T("plan.new") }</span>
-						}
-					}
-				}
-			} else {
-				<div class="overflow-hidden rounded-lg border">
-					@table.Table() {
-						@table.Body() {
+		} else {
+			@TableCard() {
+				@table.Table() {
+					@table.Body() {
 							for _, p := range plans {
 								@table.Row() {
 									@table.Cell() {
@@ -111,35 +143,34 @@ templ plansCard(plans []store.Plan) {
 											}
 											if p.OrgsAllowed {
 												@badge.Badge(badge.Props{Variant: badge.VariantSecondary}) {
-													{ T("plan.orgs") }
+													{ T(ctx, "plan.orgs") }
 												}
 											}
-											<span class="text-xs text-muted-foreground tabular-nums">{ planLimits(p) }</span>
+											<span class="text-xs text-muted-foreground tabular-nums">{ planLimits(ctx, p) }</span>
 										</div>
 									}
 									@table.Cell(table.CellProps{Class: "text-right"}) {
-										<div class="flex justify-end gap-1">
+										@RowActions() {
 											@editPlanDialog(p)
 											@ConfirmForm(Confirm{
 												ID:             "plan-" + strconv.FormatInt(p.ID, 10),
 												Action:         "/admin/plans/" + strconv.FormatInt(p.ID, 10) + "/delete",
-												Title:          T("plan.deletetitle"),
-												Message:        T("plan.delmsg.pre") + " “" + p.Name + "” " + T("plan.delmsg.post"),
-												ConfirmLabel:   T("plan.delete"),
+												Title:          T(ctx, "plan.deletetitle"),
+												Message:        Tf(ctx, "plan.deletemsg", p.Name),
+												ConfirmLabel:   T(ctx, "action.delete"),
 												ConfirmIcon:    "trash-2",
 												Danger:         true,
 												TriggerIcon:    "trash-2",
 												IconOnly:       true,
-												TriggerTooltip: T("plan.delete"),
+												TriggerTooltip: T(ctx, "action.delete"),
 												TriggerVariant: button.VariantGhost,
 											})
-										</div>
+										}
 									}
 								}
 							}
-						}
 					}
-				</div>
+				}
 			}
 		}
 	}
@@ -148,21 +179,10 @@ templ plansCard(plans []store.Plan) {
 templ newPlanDialog() {
 	@dialog.Dialog(dialog.Props{ID: "dlg-plan-new"}) {
 		@dialog.Trigger(dialog.TriggerProps{For: "dlg-plan-new"}) {
-			@button.Button(button.Props{Size: button.SizeSm}) {
-				@Icon("plus")
-				<span>{ T("plan.new") }</span>
-			}
+			@PlusButton(T(ctx, "action.new"))
 		}
-		@dialog.Content(dialog.ContentProps{Class: "text-left sm:max-w-lg"}) {
-			@dialog.Header() {
-				@dialog.Title() {
-					{ T("plan.new") }
-				}
-				@dialog.Description() {
-					{ T("plan.hint") }
-				}
-			}
-			@planFormBody("/admin/plans", nil, "plus", T("plan.create"), "dlg-plan-new")
+		@DialogBox(T(ctx, "plan.new"), T(ctx, "plan.hint"), true) {
+			@planFormBody("/admin/plans", nil, "plus", T(ctx, "action.create"), "dlg-plan-new")
 		}
 	}
 }
@@ -172,22 +192,10 @@ templ editPlanDialog(p store.Plan) {
 	{{ id := "dlg-plan-edit-" + strconv.FormatInt(p.ID, 10) }}
 	@dialog.Dialog(dialog.Props{ID: id}) {
 		@dialog.Trigger(dialog.TriggerProps{For: id}) {
-			@WithTooltip(T("plan.edit")) {
-				@button.Button(button.Props{Variant: button.VariantGhost, Size: button.SizeIcon, Type: button.TypeButton, Attributes: templ.Attributes{"aria-label": T("plan.edit")}}) {
-					@Icon("square-pen")
-				}
-			}
+			@RowAction("square-pen", T(ctx, "action.edit"), false)
 		}
-		@dialog.Content(dialog.ContentProps{Class: "text-left sm:max-w-lg"}) {
-			@dialog.Header() {
-				@dialog.Title() {
-					{ T("plan.edit") }
-				}
-				@dialog.Description() {
-					{ T("plan.hint") }
-				}
-			}
-			@planFormBody("/admin/plans/"+strconv.FormatInt(p.ID, 10)+"/edit", &p, "check", T("action.savechanges"), id)
+		@DialogBox(T(ctx, "plan.edit"), T(ctx, "plan.hint"), true) {
+			@planFormBody("/admin/plans/"+strconv.FormatInt(p.ID, 10)+"/edit", &p, "check", T(ctx, "action.save"), id)
 		}
 	}
 }
@@ -195,111 +203,77 @@ templ editPlanDialog(p store.Plan) {
 // planFormBody is the shared create/edit plan form; p is nil on create.
 templ planFormBody(action string, p *store.Plan, submitIcon, submitLabel, dlgID string) {
 	<form method="post" action={ templ.SafeURL(action) } class="mt-2 space-y-4">
-		@Field(dlgID+"-name", T("plan.name")) {
-			@input.Input(input.Props{ID: dlgID + "-name", Name: "name", Value: planName(p), Placeholder: T("ph.planname"), Required: true})
+		@Field(dlgID+"-name", T(ctx, "plan.name")) {
+			@input.Input(input.Props{ID: dlgID + "-name", Name: "name", Value: planName(p), Placeholder: T(ctx, "ph.planname"), Required: true, Attributes: templ.Attributes{"autocomplete": "off"}})
 		}
 		<div class="grid gap-4 sm:grid-cols-2">
-			@Field(dlgID+"-caches", T("plan.maxcaches")) {
-				@input.Input(input.Props{ID: dlgID + "-caches", Name: "max_caches", Type: input.TypeNumber, Value: planLimit(p, "caches"), Placeholder: T("ph.zerounlimited"), Attributes: templ.Attributes{"min": "0"}})
+			@Field(dlgID+"-caches", T(ctx, "plan.maxcaches")) {
+				@input.Input(input.Props{ID: dlgID + "-caches", Name: "max_caches", Type: input.TypeNumber, Value: planLimit(p, "caches"), Placeholder: T(ctx, "ph.zerounlimited"), Attributes: templ.Attributes{"min": "0", "autocomplete": "off"}})
 			}
-			@Field(dlgID+"-members", T("plan.maxmembers")) {
-				@input.Input(input.Props{ID: dlgID + "-members", Name: "max_members", Type: input.TypeNumber, Value: planLimit(p, "members"), Placeholder: T("ph.zerounlimited"), Attributes: templ.Attributes{"min": "0"}})
+			@Field(dlgID+"-members", T(ctx, "plan.maxmembers")) {
+				@input.Input(input.Props{ID: dlgID + "-members", Name: "max_members", Type: input.TypeNumber, Value: planLimit(p, "members"), Placeholder: T(ctx, "ph.zerounlimited"), Attributes: templ.Attributes{"min": "0", "autocomplete": "off"}})
 			}
 		</div>
-		@Field("", T("plan.maxstorage")) {
+		@Field("", T(ctx, "plan.maxstorage")) {
 			@SizeInput("plan_storage", planBytes(p))
 		}
-		@Field("", T("plan.maxretention")) {
+		@Field("", T(ctx, "plan.maxretention")) {
 			@DurationInput("plan_retention", planSecs(p))
 		}
-		@PermSwitchID(dlgID+"-orgs_allowed", "orgs_allowed", "on", T("plan.orgsallowed"), p != nil && p.OrgsAllowed)
-		@PermSwitchID(dlgID+"-public", "public", "on", T("plan.public"), p == nil || p.Public)
-		@dialog.Footer() {
-			@dialog.Close(dialog.CloseProps{For: dlgID}) {
-				@button.Button(button.Props{Variant: button.VariantOutline, Type: button.TypeButton}) {
-					{ T("action.cancel") }
-				}
-			}
-			@button.Button(button.Props{Type: button.TypeSubmit}) {
-				@Icon(submitIcon)
-				<span>{ submitLabel }</span>
-			}
+		@SwitchGroup() {
+			@PermSwitchID(dlgID+"-orgs_allowed", "orgs_allowed", "on", T(ctx, "plan.orgsallowed"), p != nil && p.OrgsAllowed)
+			@PermSwitchID(dlgID+"-public", "public", "on", T(ctx, "plan.public"), p == nil || p.Public)
 		}
+		@DialogFooter(dlgID, submitIcon, submitLabel)
 	</form>
 }
 
 // usersCard is the user administration block.
 templ usersCard(actingName string, multiTenant bool, users []store.User) {
-	@card.Card() {
-		@card.Header(card.HeaderProps{Class: "flex-row items-center justify-between space-y-0"}) {
-			@card.Title() {
-				{ T("set.users") }
-			}
-			@newUserDialog(multiTenant)
-		}
-		@card.Content() {
-			<div class="overflow-hidden rounded-lg border">
-				@table.Table() {
-					@table.Body() {
-						for _, u := range users {
-							@table.Row() {
-								@table.Cell() {
-									<div class="flex flex-wrap items-center gap-2">
-										@Icon("user")
-										<span class="font-medium">{ u.Name }</span>
-										if u.Role == "owner" {
-											@badge.Badge(badge.Props{Variant: badge.VariantDefault}) {
-												{ T("role.owner") }
-											}
-										} else {
-											@badge.Badge(badge.Props{Variant: badge.VariantSecondary}) {
-												{ T("role.user") }
-											}
-										}
-										if u.Status == "pending" {
-											@badge.Badge(badge.Props{Variant: badge.VariantOutline}) {
-												{ T("users.pending") }
-											}
-										}
-										if u.Email != "" {
-											<span class="text-xs text-muted-foreground">{ u.Email }</span>
-										}
-									</div>
-								}
-								@table.Cell(table.CellProps{Class: "text-right"}) {
-									<div class="flex justify-end gap-1">
-										if u.Status == "pending" {
-											<form method="post" action={ templ.SafeURL("/admin/users/" + strconv.FormatInt(u.ID, 10) + "/approve") }>
-												@WithTooltip(T("users.approve")) {
-													@button.Button(button.Props{Variant: button.VariantGhost, Size: button.SizeIcon, Type: button.TypeSubmit, Attributes: templ.Attributes{"aria-label": T("users.approve")}}) {
-														@Icon("user-check")
-													}
-												}
-											</form>
-										}
-										@resetUserDialog(u)
-										if u.Name != actingName && u.Role != "owner" {
-											@ConfirmForm(Confirm{
-												ID:             "del-user-" + strconv.FormatInt(u.ID, 10),
-												Action:         "/admin/users/" + strconv.FormatInt(u.ID, 10) + "/delete",
-												Title:          T("users.deletetitle"),
-												Message:        "“" + u.Name + "” " + T("users.deletemsg"),
-												ConfirmLabel:   T("users.delete"),
-												ConfirmIcon:    "trash-2",
-												Danger:         true,
-												TriggerIcon:    "trash-2",
-												IconOnly:       true,
-												TriggerTooltip: T("users.delete"),
-												TriggerVariant: button.VariantGhost,
-											})
-										}
-									</div>
+	@ListSection(T(ctx, "set.users"), newUserDialog(multiTenant)) {
+		@TableCard() {
+			@table.Table() {
+				@table.Body() {
+					for _, u := range users {
+						@table.Row() {
+							@table.Cell() {
+								<div class="flex flex-wrap items-center gap-2">
+									@RoleIcon(userRole(u))
+									<span class="font-medium">{ u.Name }</span>
+									if u.Email != "" {
+										<span class="text-xs text-muted-foreground">{ u.Email }</span>
+									}
+								</div>
+							}
+							@table.Cell(table.CellProps{Class: "text-right"}) {
+								@RowActions() {
+									if u.Status == "pending" {
+										<form method="post" action={ templ.SafeURL("/admin/users/" + strconv.FormatInt(u.ID, 10) + "/approve") }>
+											@RowAction("user-check", T(ctx, "users.approve"), true)
+										</form>
+									}
+									@resetUserDialog(u)
+									if u.Name != actingName && !u.Superadmin() {
+										@ConfirmForm(Confirm{
+											ID:             "del-user-" + strconv.FormatInt(u.ID, 10),
+											Action:         "/admin/users/" + strconv.FormatInt(u.ID, 10) + "/delete",
+											Title:          T(ctx, "users.deletetitle"),
+											Message:        Tf(ctx, "users.deletemsg", u.Name),
+											ConfirmLabel:   T(ctx, "action.delete"),
+											ConfirmIcon:    "trash-2",
+											Danger:         true,
+											TriggerIcon:    "trash-2",
+											IconOnly:       true,
+											TriggerTooltip: T(ctx, "action.delete"),
+											TriggerVariant: button.VariantGhost,
+										})
+									}
 								}
 							}
 						}
 					}
 				}
-			</div>
+			}
 		}
 	}
 }
@@ -308,36 +282,14 @@ templ resetUserDialog(u store.User) {
 	{{ id := "dlg-user-reset-" + strconv.FormatInt(u.ID, 10) }}
 	@dialog.Dialog(dialog.Props{ID: id}) {
 		@dialog.Trigger(dialog.TriggerProps{For: id}) {
-			@WithTooltip(T("users.reset")) {
-				@button.Button(button.Props{Variant: button.VariantGhost, Size: button.SizeIcon, Type: button.TypeButton, Attributes: templ.Attributes{"aria-label": T("users.reset")}}) {
-					@Icon("key-round")
-				}
-			}
+			@RowAction("key-round", T(ctx, "users.reset"), false)
 		}
-		@dialog.Content(dialog.ContentProps{Class: "text-left sm:max-w-md"}) {
-			@dialog.Header() {
-				@dialog.Title() {
-					{ T("users.resetfor") } { u.Name }
-				}
-				@dialog.Description() {
-					{ T("users.resethint") }
-				}
-			}
+		@DialogBox(Tf(ctx, "users.resetfor", u.Name), T(ctx, "users.resethint"), false) {
 			<form method="post" action={ templ.SafeURL("/admin/users/" + strconv.FormatInt(u.ID, 10) + "/reset") } class="mt-2 space-y-4">
-				@Field("reset-pw-"+strconv.FormatInt(u.ID, 10), T("users.newpw")) {
-					@input.Input(input.Props{ID: "reset-pw-" + strconv.FormatInt(u.ID, 10), Name: "password", Type: input.TypePassword, Required: true, Attributes: templ.Attributes{"autocomplete": "new-password", "minlength": "8"}})
+				@Field("reset-pw-"+strconv.FormatInt(u.ID, 10), T(ctx, "users.newpw")) {
+					@input.Input(input.Props{ID: "reset-pw-" + strconv.FormatInt(u.ID, 10), Name: "password", Type: input.TypePassword, Required: true, Attributes: templ.Attributes{"autocomplete": "off", "minlength": "8"}})
 				}
-				@dialog.Footer() {
-					@dialog.Close(dialog.CloseProps{For: id}) {
-						@button.Button(button.Props{Variant: button.VariantOutline, Type: button.TypeButton}) {
-							{ T("action.cancel") }
-						}
-					}
-					@button.Button(button.Props{Type: button.TypeSubmit}) {
-						@Icon("key-round")
-						<span>{ T("users.reset") }</span>
-					}
-				}
+				@DialogFooter(id, "key-round", T(ctx, "action.reset"))
 			</form>
 		}
 	}
@@ -346,165 +298,43 @@ templ resetUserDialog(u store.User) {
 templ newUserDialog(multiTenant bool) {
 	@dialog.Dialog(dialog.Props{ID: "dlg-user-new"}) {
 		@dialog.Trigger(dialog.TriggerProps{For: "dlg-user-new"}) {
-			@button.Button(button.Props{Size: button.SizeSm}) {
-				@Icon("plus")
-				<span>{ T("users.new") }</span>
-			}
+			@PlusButton(T(ctx, "action.new"))
 		}
-		@dialog.Content(dialog.ContentProps{Class: "text-left sm:max-w-md"}) {
-			@dialog.Header() {
-				@dialog.Title() {
-					{ T("users.new") }
-				}
-				@dialog.Description() {
-					{ T("users.hint") }
-				}
-			}
+		@DialogBox(T(ctx, "users.new"), T(ctx, "users.hint"), false) {
 			<form method="post" action="/admin/users" class="mt-2 space-y-4">
-				@Field("nu-name", T("users.name")) {
-					@input.Input(input.Props{ID: "nu-name", Name: "username", Placeholder: T("ph.newuser"), Required: true, Attributes: templ.Attributes{"pattern": "[-a-z0-9_]+"}})
+				@Field("nu-name", T(ctx, "users.name")) {
+					@input.Input(input.Props{ID: "nu-name", Name: "username", Placeholder: T(ctx, "ph.newuser"), Required: true, Attributes: templ.Attributes{"pattern": "[-a-z0-9_]+", "autocomplete": "off"}})
 				}
-				@Field("nu-email", T("users.email")) {
-					@input.Input(input.Props{ID: "nu-email", Name: "email", Type: input.TypeEmail, Placeholder: T("ph.newemail"), Required: multiTenant})
+				@Field("nu-email", T(ctx, "users.email")) {
+					@input.Input(input.Props{ID: "nu-email", Name: "email", Type: input.TypeEmail, Placeholder: T(ctx, "ph.newemail"), Required: multiTenant, Attributes: templ.Attributes{"autocomplete": "off"}})
 				}
-				@Field("nu-pw", T("login.password")) {
-					@input.Input(input.Props{ID: "nu-pw", Name: "password", Type: input.TypePassword, Required: true, Attributes: templ.Attributes{"autocomplete": "new-password", "minlength": "8"}})
+				@Field("nu-pw", T(ctx, "login.password")) {
+					@input.Input(input.Props{ID: "nu-pw", Name: "password", Type: input.TypePassword, Required: true, Attributes: templ.Attributes{"autocomplete": "off", "minlength": "8"}})
 				}
-				@dialog.Footer() {
-					@dialog.Close(dialog.CloseProps{For: "dlg-user-new"}) {
-						@button.Button(button.Props{Variant: button.VariantOutline, Type: button.TypeButton}) {
-							{ T("action.cancel") }
-						}
-					}
-					@button.Button(button.Props{Type: button.TypeSubmit}) {
-						@Icon("plus")
-						<span>{ T("users.create") }</span>
-					}
-				}
+				@DialogFooter("dlg-user-new", "plus", T(ctx, "action.create"))
 			</form>
 		}
 	}
 }
 
-// orgsCard lists organizations with usage and holds the create-org dialog.
-templ orgsCard(orgs []OrgInfo) {
-	@card.Card() {
-		@card.Header(card.HeaderProps{Class: "flex-row items-center justify-between space-y-0"}) {
-			@card.Title() {
-				{ T("org.title") }
-			}
-			@newOrgDialog("/admin/orgs")
-		}
-		@card.Content(card.ContentProps{Class: "space-y-3"}) {
-			if len(orgs) == 0 {
-				@EmptyState("building-2", T("org.empty")) {
-					@dialog.Trigger(dialog.TriggerProps{For: "dlg-org-new"}) {
-						@button.Button(button.Props{Size: button.SizeSm}) {
-							@Icon("plus")
-							<span>{ T("org.new") }</span>
-						}
-					}
-				}
-			} else {
-				<div class="overflow-hidden rounded-lg border">
-					@table.Table() {
-						@table.Body() {
-							for _, info := range orgs {
-								@table.Row() {
-									@table.Cell() {
-										<div class="flex items-center gap-2">
-											@Icon("building-2")
-											<a href={ templ.SafeURL("/admin/org/" + info.Account.Slug) } class="font-medium hover:underline">{ info.Account.Slug }</a>
-											<span class="text-xs text-muted-foreground tabular-nums">{ UsagePhrase(info) }</span>
-										</div>
-									}
-									@table.Cell(table.CellProps{Class: "text-right"}) {
-										@ConfirmForm(Confirm{
-											ID:             "org-" + info.Account.Slug,
-											Action:         "/admin/org/" + info.Account.Slug + "/delete",
-											Title:          T("org.deletetitle"),
-											Message:        "“" + info.Account.Slug + "” " + T("org.deletemsg"),
-											ConfirmLabel:   T("org.delete"),
-											ConfirmIcon:    "trash-2",
-											Danger:         true,
-											TriggerIcon:    "trash-2",
-											IconOnly:       true,
-											TriggerTooltip: T("org.delete"),
-											TriggerVariant: button.VariantGhost,
-										})
-									}
-								}
-							}
-						}
-					}
-				</div>
-			}
-		}
-	}
-}
-
-templ newOrgDialog(action string) {
-	@dialog.Dialog(dialog.Props{ID: "dlg-org-new"}) {
-		@dialog.Trigger(dialog.TriggerProps{For: "dlg-org-new"}) {
-			@button.Button(button.Props{Size: button.SizeSm}) {
-				@Icon("plus")
-				<span>{ T("org.new") }</span>
-			}
-		}
-		@dialog.Content(dialog.ContentProps{Class: "text-left sm:max-w-md"}) {
-			@dialog.Header() {
-				@dialog.Title() {
-					{ T("org.new") }
-				}
-				@dialog.Description() {
-					{ T("org.newhint") }
-				}
-			}
-			<form method="post" action={ templ.SafeURL(action) } class="mt-2 space-y-4">
-				@Field("org-name", T("org.name")) {
-					@input.Input(input.Props{ID: "org-name", Name: "name", Placeholder: T("ph.orgname"), Required: true, Attributes: templ.Attributes{"pattern": "[-a-z0-9_]+"}})
-				}
-				@dialog.Footer() {
-					@dialog.Close(dialog.CloseProps{For: "dlg-org-new"}) {
-						@button.Button(button.Props{Variant: button.VariantOutline, Type: button.TypeButton}) {
-							{ T("action.cancel") }
-						}
-					}
-					@button.Button(button.Props{Type: button.TypeSubmit}) {
-						@Icon("plus")
-						<span>{ T("org.create") }</span>
-					}
-				}
-			</form>
-		}
-	}
-}
-
-// maintCard is instance-wide maintenance: garbage collection.
+// maintCard is instance-wide maintenance: garbage collection. A section, not
+// a card — one sentence and one button is not an object worth a box.
 templ maintCard() {
-	@card.Card() {
-		@card.Header() {
-			@card.Title() {
-				{ T("inst.maint") }
-			}
-			@card.Description() {
-				{ T("inst.gcdesc") }
-			}
-		}
-		@card.Content() {
-			<div class="flex justify-end">
+	@ListSection(T(ctx, "inst.maint"), nil) {
+		<div class="border-y py-3">
+			@ActionRow(T(ctx, "inst.gcdesc")) {
 				@ConfirmForm(Confirm{
 					ID:           "gc",
 					Action:       "/admin/gc",
-					Title:        T("inst.gctitle"),
-					Message:      T("inst.gcmsg"),
-					ConfirmLabel: T("inst.gcrun"),
+					Title:        T(ctx, "inst.gctitle"),
+					Message:      T(ctx, "inst.gcmsg"),
+					ConfirmLabel: T(ctx, "inst.gcrun"),
 					ConfirmIcon:  "recycle",
 					Danger:       true,
-					TriggerLabel: T("inst.gcrun"),
+					TriggerLabel: T(ctx, "inst.gcrun"),
 					TriggerIcon:  "recycle",
 				})
-			</div>
-		}
+			}
+		</div>
 	}
 }

@@ -19,6 +19,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/stubbedev/xilo/internal/testenv"
+
 	"github.com/stubbedev/xilo/internal/chunk"
 	"github.com/stubbedev/xilo/internal/nar"
 	"github.com/stubbedev/xilo/internal/narinfo"
@@ -242,7 +244,7 @@ func TestExternalDumpEnvForcesNixStore(t *testing.T) {
 // received), then pulled back and compared with nix's own dump.
 func TestPushRealStorePathAgainstRealServer(t *testing.T) {
 	if _, err := exec.LookPath("nix"); err != nil {
-		t.Skip("nix not on PATH")
+		testenv.Need(t, "nix on PATH", err.Error())
 	}
 	storePath := findSmallStorePath(t)
 	if storePath == "" {
@@ -273,7 +275,7 @@ func TestPushRealStorePathAgainstRealServer(t *testing.T) {
 	}
 	got, _ := io.ReadAll(resp.Body)
 	resp.Body.Close()
-	if resp.StatusCode != 200 {
+	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("nar: %d", resp.StatusCode)
 	}
 	gs, ws := sha256.Sum256(got), sha256.Sum256(want)

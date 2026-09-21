@@ -26,7 +26,7 @@ func TestUsersLifecycle(t *testing.T) {
 	if err != nil || got.ID != u.ID || got.PassHash != "hash-1" || got.Role != "owner" {
 		t.Fatalf("GetUserByName: %+v %v", got, err)
 	}
-	if _, err := db.GetUser(9999); err != ErrNotFound {
+	if _, err := db.GetUser(9999); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("missing user: %v", err)
 	}
 	if err := db.SetUserPassword(u.ID, "hash-3"); err != nil {
@@ -55,7 +55,7 @@ func TestUsersLifecycle(t *testing.T) {
 	if pks, _ := db.ListUserPasskeys(m.ID); len(pks) != 0 {
 		t.Fatal("passkeys should be gone with the user")
 	}
-	if _, err := db.GetUser(m.ID); err != ErrNotFound {
+	if _, err := db.GetUser(m.ID); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("user should be gone: %v", err)
 	}
 }
@@ -122,12 +122,12 @@ func openLegacyAdminDB(t *testing.T) *DB {
 }
 
 // TestAdminMigration builds a pre-users database (singleton admin table) and
-// checks migrate() converts it: admin row → user "admin" (role owner), passkeys claimed,
+// checks migrate() converts it: admin row → user "admin" (role superadmin), passkeys claimed,
 // sessions wiped, old table dropped.
 func TestAdminMigration(t *testing.T) {
 	db := openLegacyAdminDB(t)
 	u, err := db.GetUserByName("admin")
-	if err != nil || u.Role != "owner" || u.PassHash != "legacy-hash" {
+	if err != nil || u.Role != RoleSuperadmin || u.PassHash != "legacy-hash" {
 		t.Fatalf("migrated admin: %+v %v", u, err)
 	}
 	if !u.TOTPEnabled {
@@ -200,10 +200,19 @@ func TestOwnerHierarchy(t *testing.T) {
 		t.Fatal(err)
 	}
 	if db.MemberRole(personal.ID, creator.ID) != "owner" {
-		t.Fatal("personal account should be owner-held")
+		t.Fatal("own workspace should be owner-held")
 	}
-	if err := db.SetMember(personal.ID, other.ID, "user"); err == nil {
-		t.Fatal("personal accounts must not take members")
+	// A workspace is an organization with one member, so it can gain more —
+	// that is how one person's cache becomes a team's.
+	if err := db.SetMember(personal.ID, other.ID, "user"); err != nil {
+		t.Fatalf("workspace refused a member: %v", err)
+	}
+	if db.MemberRole(personal.ID, other.ID) != "user" {
+		t.Fatal("member not recorded")
+	}
+	// Its owner still cannot be demoted, the same as any organization's.
+	if err := db.SetMember(personal.ID, creator.ID, "admin"); !errors.Is(err, ErrOwnerRole) {
+		t.Fatalf("owner demoted in own workspace: %v", err)
 	}
 }
 

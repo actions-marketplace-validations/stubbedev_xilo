@@ -4,7 +4,7 @@ import (
 	"github.com/stubbedev/xilo/internal/store"
 
 	"github.com/templui/templui/components/badge"
-	"github.com/templui/templui/components/card"
+	"github.com/templui/templui/components/button"
 	"github.com/templui/templui/components/table"
 )
 
@@ -13,69 +13,105 @@ type AuditData struct {
 	Nav     Nav
 	Entries []store.AuditEntry
 	Query   string
+	Method  string // active method filter ("" = all)
+	Status  string // active status-class filter ("" = all)
+	Methods []string
+	Classes []string
+	Stats   store.AuditStats
 	Total   int64
 	Pager   Pager
 	Sort    SortCtx
 }
 
+// filtered reports whether any narrowing (search or chip) is active.
+func (d AuditData) filtered() bool { return d.Query != "" || d.Method != "" || d.Status != "" }
+
 templ AuditPage(d AuditData) {
-	@Layout(T("audit.title"), "audit", d.Nav, Flash{}) {
-		@PageHeader(T("audit.title"), T("audit.subtitle")) {
-			@SearchInput("/admin/audit", "q", d.Query, T("audit.search"), "#audit-results")
+	@Layout(T(ctx, "audit.title"), "audit", d.Nav, Flash{}) {
+		@PageHeader(T(ctx, "audit.title"), T(ctx, "audit.subtitle")) {
+			// An empty, unfiltered log has nothing to search.
+			if len(d.Entries) > 0 || d.filtered() {
+				@SearchInput(d.Sort.With("q", ""), "q", d.Query, T(ctx, "audit.search"), "#audit-results")
+			}
+		}
+		@StatRow() {
+			@StatTile("scroll-text", Count(d.Stats.Total), T(ctx, "audit.total"), "", "")
+			@StatTile("triangle-alert", Count(d.Stats.Failed), T(ctx, "audit.failed"), "", failTone(d.Stats.Failed))
+			@StatTile("users", Count(d.Stats.Actors), T(ctx, "audit.actors"), "", "")
+			@StatTile("timer", itoa(d.Stats.AvgMs)+" "+T(ctx, "audit.ms"), T(ctx, "audit.avgms"), "", "")
 		}
 		@auditResults(d)
 	}
 }
 
-// auditResults is the swap target for live activity search.
+// auditResults is the swap target for live activity search; the filter chips
+// live inside it so their active state follows every swap.
 templ auditResults(d AuditData) {
 	<div id="audit-results" hx-target="#audit-results" hx-select="#audit-results" hx-swap="outerHTML show:none">
+		<div class="mb-4 flex flex-wrap items-center gap-x-6 gap-y-2">
+			@auditChips(d, "method", T(ctx, "audit.method"), d.Method, d.Methods)
+			@auditChips(d, "status", T(ctx, "audit.status"), d.Status, d.Classes)
+		</div>
 		if len(d.Entries) == 0 {
-			if d.Query != "" {
-				@EmptyState("search-x", T("audit.nomatch"))
+			if d.filtered() {
+				@EmptyState("search-x", T(ctx, "empty.nomatch"))
 			} else {
-				@EmptyState("scroll-text", T("audit.empty"))
+				@EmptyState("scroll-text", T(ctx, "empty.none"))
 			}
 		} else {
-			@card.Card(card.Props{Class: "p-0"}) {
+			@TableCard() {
 				@table.Table(table.Props{Class: "table-fixed"}) {
 					@table.Header() {
 						@table.Row() {
-							@SortHead(d.Sort, "time", T("audit.time"), "w-44")
-							@SortHead(d.Sort, "actor", T("audit.actor"), "w-48")
-							@SortHead(d.Sort, "path", T("audit.action"), "")
-							@SortHead(d.Sort, "status", T("audit.status"), "w-28")
+							@SortHead(d.Sort, "time", T(ctx, "audit.time"), "w-40")
+							@SortHead(d.Sort, "actor", T(ctx, "audit.actor"), "w-44")
+							@SortHead(d.Sort, "path", T(ctx, "audit.action"), "")
+							@SortHead(d.Sort, "status", T(ctx, "audit.status"), "w-28")
 						}
 					}
 					@table.Body() {
 						for _, e := range d.Entries {
 							@table.Row() {
-								@table.Cell(table.CellProps{Class: "align-top text-muted-foreground"}) {
-									@WithTooltip(Ago(e.TS)) {
-										<span class="tabular-nums">{ stamp(e.TS) }</span>
+								@table.Cell(table.CellProps{Class: "text-muted-foreground"}) {
+									@WithTooltip(Ago(ctx, e.TS)) {
+										<span class="font-mono text-xs tabular-nums">{ stamp(e.TS) }</span>
 									}
 								}
-								@table.Cell(table.CellProps{Class: "align-top"}) {
-									<div class="min-w-0">
-										if e.Actor != "" {
-											<div class="truncate font-medium">{ e.Actor }</div>
+								// One line, not two: an address stacked under every
+								// actor doubled the height of every row in a log
+								// that is read by scanning down it.
+								@table.Cell() {
+									<div class="flex min-w-0 items-baseline gap-2">
+										if e.Actor != "" && e.UserID == 0 {
+											@WithTooltip(T(ctx, "audit.token")) {
+												<span class="flex shrink-0 items-center gap-1 font-medium">
+													@Icon("key-round")
+													<span class="truncate">{ e.Actor }</span>
+												</span>
+											}
+										} else if e.Actor != "" {
+											<span class="shrink-0 truncate font-medium">{ e.Actor }</span>
 										} else {
-											<div class="truncate text-muted-foreground">{ T("audit.system") }</div>
+											<span class="shrink-0 truncate text-muted-foreground">{ T(ctx, "audit.system") }</span>
 										}
 										if e.IP != "" {
-											<div class="truncate font-mono text-xs text-muted-foreground">{ e.IP }</div>
+											@WithTooltip(e.IP) {
+												@Meta() {
+													{ e.IP }
+												}
+											}
 										}
 									</div>
 								}
-								@table.Cell(table.CellProps{Class: "align-top"}) {
+								@table.Cell() {
 									@auditAction(e)
 								}
-								@table.Cell(table.CellProps{Class: "align-top"}) {
-									<div class="space-y-1">
+								@table.Cell() {
+									<div class="flex items-center gap-2">
 										@badge.Badge(badge.Props{Variant: auditStatusVariant(e.Status)}) {
 											{ itoa(int64(e.Status)) }
 										}
-										<div class="text-xs text-muted-foreground tabular-nums">{ itoa(e.DurationMs) } { T("audit.ms") }</div>
+										<span class="font-mono text-xs text-muted-foreground tabular-nums">{ itoa(e.DurationMs) } { T(ctx, "audit.ms") }</span>
 									</div>
 								}
 							}
@@ -86,6 +122,25 @@ templ auditResults(d AuditData) {
 			@PagerNav(d.Pager)
 		}
 	</div>
+}
+
+// auditChips is one segmented filter: "All" plus one chip per value, each a
+// link that swaps the results in place and composes with search and sort.
+templ auditChips(d AuditData, param, label, active string, values []string) {
+	<div class="flex flex-wrap items-center gap-1">
+		<span class="mr-1 text-xs text-muted-foreground">{ label }</span>
+		@auditChip(d, param, "", T(ctx, "audit.all"), active == "")
+		for _, v := range values {
+			@auditChip(d, param, v, v, active == v)
+		}
+	</div>
+}
+
+templ auditChip(d AuditData, param, value, label string, on bool) {
+	{{ href := d.Sort.With(param, value) }}
+	@button.Button(button.Props{Href: href, Size: button.SizeSm, Variant: chipVariant(on), Class: "h-7 px-2 font-mono text-xs", Attributes: hxSwapAttrs(href, "#audit-results")}) {
+		{ label }
+	}
 }
 
 // auditAction is the method badge + request path; the user agent (when known)
