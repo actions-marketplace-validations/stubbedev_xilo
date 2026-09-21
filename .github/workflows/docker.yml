@@ -12,7 +12,7 @@ jobs:
       contents: read
       packages: write
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@v7.0.1
       # The release tarballs cover arm64, so the image has to as well — a Pi or
       # an Ampere VPS pulling `latest` was getting an amd64-only manifest. No
       # QEMU step: the Dockerfile cross-compiles from the build platform (see
