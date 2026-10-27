@@ -26,7 +26,7 @@ jobs:
             churn_config: server-mt-churn.yaml
             tenants: 4
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@v7.0.1
 
       - name: perf suite
         run: |
