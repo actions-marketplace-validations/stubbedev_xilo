@@ -23,7 +23,7 @@ jobs:
     # generate, then compiling the tree with the detector on, on two cores.
     timeout-minutes: 75
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@v7.0.1
       # compose's `race` profile runs the server under `go run -race` on a
       # glibc base, with hostile GC (server-churn.yaml) and concurrent dedup
       # pushes against it. The store's whole claim is that writes funnel
@@ -48,7 +48,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@v7.0.1
       - uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
@@ -75,7 +75,7 @@ jobs:
     # targets are added (scripts/fuzz.sh discovers them), so leave room.
     timeout-minutes: 90
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@v7.0.1
       - uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
